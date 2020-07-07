@@ -26,6 +26,8 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/Attributor.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/MemorySSA.h"
 
 using namespace llvm;
 using namespace omp;
@@ -223,7 +225,7 @@ bool OMPInformationCache::declMatchesRTFTypes(
   if (F->arg_size() != RTFArgTypes.size())
     return false;
 
-  auto RTFTyIt = RTFArgTypes.begin();
+  auto *RTFTyIt = RTFArgTypes.begin();
   for (Argument &Arg : F->args()) {
     if (Arg.getType() != *RTFTyIt)
       return false;
@@ -231,6 +233,17 @@ bool OMPInformationCache::declMatchesRTFTypes(
     ++RTFTyIt;
   }
 
+  return true;
+}
+
+bool OMPInformationCache::MemoryTransfer::isFilled(OffloadArray &OA) {
+  for (auto *Acc : OA.LastAccesses)
+    if (!Acc)
+      return false;
+
+  for (auto *Addr : OA.StoredAddresses)
+    if (!Addr)
+      return false;
   return true;
 }
 
@@ -443,6 +456,7 @@ bool OpenMPOpt::run() {
   Changed |= runAttributor();
   Changed |= deduplicateRuntimeCalls();
   Changed |= deleteParallelRegions();
+  Changed |= hideMemTransfersLatency();
 
   return Changed;
 }
@@ -556,6 +570,155 @@ bool OpenMPOpt::deduplicateRuntimeCalls() {
   }
 
   return Changed;
+}
+
+bool OpenMPOpt::hideMemTransfersLatency() {
+  OMPInformationCache::RuntimeFunctionInfo &RFI =
+      OMPInfoCache.RFIs[OMPRTL___tgt_target_data_begin];
+
+  bool Changed = false;
+  auto SplitDataTransfer = [&] (Use &U, Function &Decl) {
+    auto *RTCall = getCallIfRegularCall(U, &RFI);
+    if (!RTCall)
+      return false;
+
+    auto *MSSAResult =
+        OMPInfoCache.getAnalysisResultForFunction<MemorySSAAnalysis>(
+            *RTCall->getCaller());
+    if (!MSSAResult)
+      return false;
+
+    auto &MSSA = MSSAResult->getMSSA();
+    MemoryTransfer MT(RTCall, MSSA);
+    Changed = splitMemoryTransfer(MT);
+    return Changed;
+  };
+
+  RFI.foreachUse(SplitDataTransfer);
+  return Changed;
+}
+
+bool OpenMPOpt::splitMemoryTransfer(MemoryTransfer &MT) {
+  bool Changed = false;
+  bool Success = getValuesInOfflArrays(MT);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload arrays in call to "
+                      << MT.RuntimeCall->getName() << " in function "
+                      << MT.RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+
+  return Changed;
+}
+
+bool OpenMPOpt::getValuesInOfflArrays(MemoryTransfer &MT) {
+  auto *RuntimeCall = MT.RuntimeCall;
+  const unsigned BasePtrs = 2; // **offload_baseptrs.
+  const unsigned Ptrs = 3; // **offload_ptrs.
+  const unsigned Sizes = 4; // **offload_sizes.
+  auto *BasePtrsArg = RuntimeCall->arg_begin() + BasePtrs;
+  auto *PtrsArg = RuntimeCall->arg_begin() + Ptrs;
+  auto *SizesArg = RuntimeCall->arg_begin() + Sizes;
+  const auto &DL = OMPInfoCache.getDL();
+
+  // Get values stored in **offload_baseptrs.
+  auto *V = GetUnderlyingObject(BasePtrsArg->get(), DL);
+  bool Success = getValuesInOfflArray(V, *MT.BasePtrs, RuntimeCall);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs in call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+
+  // Get values stored in **offload_ptrs.
+  V = GetUnderlyingObject(PtrsArg->get(), DL);
+  Success = getValuesInOfflArray(V, *MT.Ptrs, RuntimeCall);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs in call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+
+  // Get values stored in **offload_sizes.
+  V = GetUnderlyingObject(SizesArg->get(), DL);
+  Success = getValuesInOfflArray(V, *MT.Sizes, RuntimeCall);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_sizes in call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+  return true;
+}
+
+/// Gets the values stored in \p OfflArray and stores them in \p Dst.
+/// \p Before serves as a lower bound, so don't look at accesses after that.
+bool OpenMPOpt::getValuesInOfflArray(
+    Value *OfflArray, MemoryTransfer::OffloadArray &Dst, User *Before) {
+  assert(OfflArray && "Can't get values in nullptr!");
+
+  if (!isa<AllocaInst>(OfflArray)) {
+    LLVM_DEBUG(dbgs() << TAG << "Only alloca arrays supported.\n");
+    return false;
+  }
+
+  auto *ArrayAlloc = cast<AllocaInst>(OfflArray);
+  const uint64_t NumValues =
+      ArrayAlloc->getAllocatedType()->getArrayNumElements();
+
+  auto &LastAccesses = Dst.LastAccesses;
+  auto &StoredAddresses = Dst.StoredAddresses;
+  LastAccesses.assign(NumValues, nullptr);
+  StoredAddresses.assign(NumValues, nullptr);
+
+  // Get last accesses to the array right before Before.
+  for (auto *Usr : OfflArray->users()) {
+    // If reached lower limit.
+    if (Before && Usr == Before)
+      break;
+
+    auto *Access = dyn_cast<GetElementPtrInst>(Usr);
+    if (!Access)
+      continue;
+
+    auto *ArrayIdx = Access->idx_begin() + 1;
+    if (ArrayIdx == Access->idx_end())
+      continue;
+
+    const uint64_t IdxLiteral = getIntLiteral(ArrayIdx->get());
+    LastAccesses[IdxLiteral] = Usr;
+  }
+
+  // Get stored addresses.
+  for (unsigned It = 0; It < NumValues; ++It) {
+    auto *Accs = LastAccesses[It];
+    auto AccsUsr = Accs->user_begin();
+    if (AccsUsr == Accs->user_end()) {
+      LLVM_DEBUG(dbgs() << TAG << "Useless access to offload array.\n");
+      return false;
+    }
+
+    auto *I = cast<Instruction>(*AccsUsr);
+    if (I->isCast())
+      AccsUsr = I->user_begin();
+
+    if (!isa<StoreInst>(*AccsUsr)) {
+      LLVM_DEBUG(dbgs() << TAG << "Unrecognized access pattern.\n");
+      return false;
+    }
+
+    StoredAddresses[It] =
+        GetUnderlyingObject(AccsUsr->getOperand(0), OMPInfoCache.getDL());
+  }
+
+  if (!MemoryTransfer::isFilled(Dst)) {
+    LLVM_DEBUG(dbgs() << TAG << "Didn't get all values in offload array.\n");
+    return false;
+  }
+
+  return true;
 }
 
 Value *OpenMPOpt::combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,

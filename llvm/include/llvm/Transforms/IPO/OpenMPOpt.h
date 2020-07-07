@@ -21,7 +21,6 @@
 #include "llvm/Analysis/MemorySSA.h"
 
 namespace llvm {
-
 namespace omp {
 
 using namespace types;
@@ -133,6 +132,30 @@ struct OMPInformationCache : public InformationCache {
     DenseMap<Function *, std::shared_ptr<UseVector>> UsesMap;
   };
 
+  /// Used to store information about a runtime call that involves
+  /// host to device memory offloading.
+  struct MemoryTransfer {
+    struct OffloadArray {
+      SmallVector<Value *, 8> LastAccesses;
+      SmallVector<Value *, 8> StoredAddresses;
+    };
+
+    CallBase *RuntimeCall;
+    MemorySSA &MSSA;
+    std::unique_ptr<OffloadArray> BasePtrs;
+    std::unique_ptr<OffloadArray> Ptrs;
+    std::unique_ptr<OffloadArray> Sizes;
+
+    MemoryTransfer(CallBase *RuntimeCall, MemorySSA &MSSA) :
+        RuntimeCall{RuntimeCall}, MSSA{MSSA},
+        BasePtrs {std::make_unique<OffloadArray>()},
+        Ptrs {std::make_unique<OffloadArray>()},
+        Sizes {std::make_unique<OffloadArray>()}
+    {}
+
+    static bool isFilled(OffloadArray &OA);
+  };
+
   /// The slice of the module we are allowed to look at.
   SmallPtrSetImpl<Function *> &ModuleSlice;
 
@@ -166,6 +189,7 @@ struct OMPInformationCache : public InformationCache {
 
 struct OpenMPOpt {
 
+  using MemoryTransfer = OMPInformationCache::MemoryTransfer;
   using OptimizationRemarkGetter =
   function_ref<OptimizationRemarkEmitter &(Function *)>;
 
@@ -177,6 +201,10 @@ struct OpenMPOpt {
 
   /// Run all OpenMP optimizations on the underlying SCC/ModuleSlice.
   bool run();
+
+  /// Gets the values stored in the offload arrays specified by \p MT. Returns
+  /// false if some of the values couldn't be found.
+  bool getValuesInOfflArrays(MemoryTransfer &MT);
 
   /// Return the call if \p U is a callee use in a regular call. If \p RFI is
   /// given it has to be the callee or a nullptr is returned.
@@ -195,6 +223,12 @@ private:
   /// Try to eliminiate runtime calls by reusing existing ones.
   bool deduplicateRuntimeCalls();
 
+  /// Splits a runtime call that involves a host to device transfer into its ""
+  bool splitMemoryTransfer(MemoryTransfer &MT);
+
+  bool getValuesInOfflArray(Value *OfflArray, MemoryTransfer::OffloadArray &Dst,
+                            User *Before);
+
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);
 
@@ -212,6 +246,10 @@ private:
   bool deduplicateRuntimeCalls(Function &F,
                                OMPInformationCache::RuntimeFunctionInfo &RFI,
                                Value *ReplVal = nullptr);
+
+  /// Tries to hide the latency of runtime calls that involve host to
+  /// device memory transfers.
+  bool hideMemTransfersLatency();
 
   /// Collect arguments that represent the global thread id in \p GTIdArgs.
   void collectGlobalThreadIdArguments(SmallSetVector<Value *, 16> &GTIdArgs);
@@ -263,6 +301,12 @@ private:
   /// Populate the Attributor with abstract attribute opportunities in the
   /// function.
   void registerAAs();
+
+  /// Returns the integer representation of \p V.
+  static uint64_t getIntLiteral(const Value *V) {
+    assert(V && "Getting Integer value of nullptr");
+    return (dyn_cast<ConstantInt>(V))->getZExtValue();
+  }
 };
 
 /// Helper to remember if the module contains OpenMP (runtime calls), to be used
