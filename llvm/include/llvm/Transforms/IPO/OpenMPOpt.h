@@ -16,8 +16,6 @@
 #include "llvm/Transforms/IPO/Attributor.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
-#include "llvm/IR/PassManager.h"
-#include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LazyCallGraph.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Analysis/MemorySSA.h"
