@@ -21,7 +21,7 @@ protected:
 
     auto &RFI = OMPInfoCache->RFIs[OMPRTL___tgt_target_data_begin];
     auto GetCallSites = [&](Use &U, Function &Decl) {
-      auto *RTCall = OpenMPOpt::getCallIfRegularCall(U, &RFI);
+      auto *RTCall = OMPInformationCache::getCallIfRegularCall(U, &RFI);
       if (!RTCall)
         return false;
       MemTransferCalls.push_back(RTCall);
@@ -33,7 +33,7 @@ protected:
 };
 
 TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
-// Update this ModuleString;
+// TODO: Update this ModuleString.
 const char *ModuleString = "";
 getCallSites(ModuleString);
 
