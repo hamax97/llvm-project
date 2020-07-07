@@ -1,4 +1,4 @@
-//===- IPO/OpenMPOpt.h - Collection of OpenMP optimizations -----*- C++ -*-===//
+//===- OpenMPOptPriv.h - Private structs for OpenMPOpt ----------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -166,15 +166,25 @@ struct OMPInformationCache : public InformationCache {
   /// defined in OMPKinds.def.
   void initializeInternalControlVars();
 
+  /// Helper to initialize all runtime function information for those defined
+  /// in OpenMPKinds.def.
+  void initializeRuntimeFunctions();
+
   /// Returns true if the function declaration \p F matches the runtime
   /// function types, that is, return type \p RTFRetType, and argument types
   /// \p RTFArgTypes.
   static bool declMatchesRTFTypes(Function *F, Type *RTFRetType,
                                   SmallVector<Type *, 8> &RTFArgTypes);
 
-  /// Helper to initialize all runtime function information for those defined
-  /// in OpenMPKinds.def.
-  void initializeRuntimeFunctions();
+  /// Return the call if \p U is a callee use in a regular call. If \p RFI is
+/// given it has to be the callee or a nullptr is returned.
+  static CallInst *getCallIfRegularCall(
+      Use &U, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr);
+
+/// Return the call if \p V is a regular call. If \p RFI is given it has to be
+/// the callee or a nullptr is returned.
+  static CallInst *getCallIfRegularCall(
+      Value &V, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr);
 };
 
 } // end anonymous namespace
