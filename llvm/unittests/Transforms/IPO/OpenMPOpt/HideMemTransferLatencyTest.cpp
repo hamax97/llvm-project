@@ -21,7 +21,7 @@ protected:
 
     auto &RFI = OMPInfoCache->RFIs[OMPRTL___tgt_target_data_begin];
     auto GetCallSites = [&](Use &U, Function &Decl) {
-      auto *RTCall = OMPInformationCache::getCallIfRegularCall(U, &RFI);
+      auto *RTCall = OpenMPOpt::getCallIfRegularCall(U, &RFI);
       if (!RTCall)
         return false;
       MemTransferCalls.push_back(RTCall);
@@ -32,12 +32,12 @@ protected:
   }
 };
 
-TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
-// TODO: Update this ModuleString.
-const char *ModuleString = "";
-getCallSites(ModuleString);
-
-EXPECT_TRUE(true);
-}
+//TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
+//  // TODO: Update this ModuleString.
+//  const char *ModuleString = "";
+//  getCallSites(ModuleString);
+//
+//  EXPECT_TRUE(true);
+//}
 
 } // end anonymous namespace

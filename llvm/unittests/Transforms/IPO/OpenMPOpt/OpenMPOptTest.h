@@ -9,11 +9,12 @@
 #ifndef LLVM_UNITTESTS_TRANSFORMS_IPO_OPENMPOPT_H
 #define LLVM_UNITTESTS_TRANSFORMS_IPO_OPENMPOPT_H
 
-#include "../../../../lib/Transforms/IPO/OpenMPOptPriv.h"
+#include "llvm/Transforms/IPO/OpenMPOpt.h"
 #include "llvm/AsmParser/Parser.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
+using namespace omp;
 
 namespace {
 
