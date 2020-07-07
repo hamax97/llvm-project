@@ -162,8 +162,6 @@ struct OMPInformationCache : public InformationCache {
   /// \p RTFArgTypes.
   static bool declMatchesRTFTypes(Function *F, Type *RTFRetType,
                                   SmallVector<Type *, 8> &RTFArgTypes);
-
-
 };
 
 struct OpenMPOpt {

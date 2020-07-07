@@ -154,29 +154,6 @@ void OMPInformationCache::initializeInternalControlVars() {
 #include "llvm/Frontend/OpenMP/OMPKinds.def"
 }
 
-bool OMPInformationCache::declMatchesRTFTypes(
-    Function *F, Type *RTFRetType, SmallVector<Type *, 8> &RTFArgTypes) {
-  // TODO: We should output information to the user (under debug output
-  //       and via remarks).
-
-  if (!F)
-    return false;
-  if (F->getReturnType() != RTFRetType)
-    return false;
-  if (F->arg_size() != RTFArgTypes.size())
-    return false;
-
-  auto RTFTyIt = RTFArgTypes.begin();
-  for (Argument &Arg : F->args()) {
-    if (Arg.getType() != *RTFTyIt)
-      return false;
-
-    ++RTFTyIt;
-  }
-
-  return true;
-}
-
 void OMPInformationCache::initializeRuntimeFunctions() {
   // Helper to collect all uses of the decleration in the UsesMap.
   auto CollectUses = [&](RuntimeFunctionInfo &RFI) {
@@ -232,6 +209,29 @@ void OMPInformationCache::initializeRuntimeFunctions() {
 #include "llvm/Frontend/OpenMP/OMPKinds.def"
 
   // TODO: We should attach the attributes defined in OMPKinds.def.
+}
+
+bool OMPInformationCache::declMatchesRTFTypes(
+    Function *F, Type *RTFRetType, SmallVector<Type *, 8> &RTFArgTypes) {
+  // TODO: We should output information to the user (under debug output
+  //       and via remarks).
+
+  if (!F)
+    return false;
+  if (F->getReturnType() != RTFRetType)
+    return false;
+  if (F->arg_size() != RTFArgTypes.size())
+    return false;
+
+  auto RTFTyIt = RTFArgTypes.begin();
+  for (Argument &Arg : F->args()) {
+    if (Arg.getType() != *RTFTyIt)
+      return false;
+
+    ++RTFTyIt;
+  }
+
+  return true;
 }
 
 //===----------------------------------------------------------------------===//
