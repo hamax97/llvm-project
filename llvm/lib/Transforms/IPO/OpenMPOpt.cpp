@@ -212,6 +212,24 @@ void OMPInformationCache::initializeRuntimeFunctions() {
   // TODO: We should attach the attributes defined in OMPKinds.def.
 }
 
+CallInst *OMPInformationCache::getCallIfRegularCall(
+    Use &U, OMPInformationCache::RuntimeFunctionInfo *RFI) {
+  CallInst *CI = dyn_cast<CallInst>(U.getUser());
+  if (CI && CI->isCallee(&U) && !CI->hasOperandBundles() &&
+      (!RFI || CI->getCalledFunction() == RFI->Declaration))
+    return CI;
+  return nullptr;
+}
+
+CallInst *OMPInformationCache::getCallIfRegularCall(
+    Value &V, OMPInformationCache::RuntimeFunctionInfo *RFI) {
+  CallInst *CI = dyn_cast<CallInst>(&V);
+  if (CI && !CI->hasOperandBundles() &&
+      (!RFI || CI->getCalledFunction() == RFI->Declaration))
+    return CI;
+  return nullptr;
+}
+
 struct OpenMPOpt {
 
   using OptimizationRemarkGetter =
@@ -259,28 +277,6 @@ struct OpenMPOpt {
     return Changed;
   }
 
-  /// Return the call if \p U is a callee use in a regular call. If \p RFI is
-  /// given it has to be the callee or a nullptr is returned.
-  static CallInst *getCallIfRegularCall(
-      Use &U, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr) {
-    CallInst *CI = dyn_cast<CallInst>(U.getUser());
-    if (CI && CI->isCallee(&U) && !CI->hasOperandBundles() &&
-        (!RFI || CI->getCalledFunction() == RFI->Declaration))
-      return CI;
-    return nullptr;
-  }
-
-  /// Return the call if \p V is a regular call. If \p RFI is given it has to be
-  /// the callee or a nullptr is returned.
-  static CallInst *getCallIfRegularCall(
-      Value &V, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr) {
-    CallInst *CI = dyn_cast<CallInst>(&V);
-    if (CI && !CI->hasOperandBundles() &&
-        (!RFI || CI->getCalledFunction() == RFI->Declaration))
-      return CI;
-    return nullptr;
-  }
-
 private:
   /// Try to delete parallel regions if possible.
   bool deleteParallelRegions() {
@@ -294,7 +290,7 @@ private:
 
     bool Changed = false;
     auto DeleteCallCB = [&](Use &U, Function &) {
-      CallInst *CI = getCallIfRegularCall(U);
+      CallInst *CI = OMPInformationCache::getCallIfRegularCall(U);
       if (!CI)
         return false;
       auto *Fn = dyn_cast<Function>(
@@ -402,7 +398,7 @@ private:
     bool SingleChoice = true;
     Value *Ident = nullptr;
     auto CombineIdentStruct = [&](Use &U, Function &Caller) {
-      CallInst *CI = getCallIfRegularCall(U, &RFI);
+      CallInst *CI = OMPInformationCache::getCallIfRegularCall(U, &RFI);
       if (!CI || &F != &Caller)
         return false;
       Ident = combinedIdentStruct(Ident, CI->getArgOperand(0),
@@ -457,7 +453,7 @@ private:
 
     if (!ReplVal) {
       for (Use *U : *UV)
-        if (CallInst *CI = getCallIfRegularCall(*U, &RFI)) {
+        if (CallInst *CI = OMPInformationCache::getCallIfRegularCall(*U, &RFI)) {
           if (!CanBeMoved(*CI))
             continue;
 
@@ -491,7 +487,7 @@ private:
 
     bool Changed = false;
     auto ReplaceAndDeleteCB = [&](Use &U, Function &Caller) {
-      CallInst *CI = getCallIfRegularCall(U, &RFI);
+      CallInst *CI = OMPInformationCache::getCallIfRegularCall(U, &RFI);
       if (!CI || CI == ReplVal || &F != &Caller)
         return false;
       assert(CI->getCaller() == &F && "Unexpected call!");
@@ -526,10 +522,10 @@ private:
       if (!F.hasLocalLinkage())
         return false;
       for (Use &U : F.uses()) {
-        if (CallInst *CI = getCallIfRegularCall(U)) {
+        if (CallInst *CI = OMPInformationCache::getCallIfRegularCall(U)) {
           Value *ArgOp = CI->getArgOperand(ArgNo);
           if (CI == &RefCI || GTIdArgs.count(ArgOp) ||
-              getCallIfRegularCall(
+              OMPInformationCache::getCallIfRegularCall(
                   *ArgOp, &OMPInfoCache.RFIs[OMPRTL___kmpc_global_thread_num]))
             continue;
         }
@@ -553,7 +549,8 @@ private:
         OMPInfoCache.RFIs[OMPRTL___kmpc_global_thread_num];
 
     GlobThreadNumRFI.foreachUse([&](Use &U, Function &F) {
-      if (CallInst *CI = getCallIfRegularCall(U, &GlobThreadNumRFI))
+      if (CallInst *CI =
+              OMPInformationCache::getCallIfRegularCall(U, &GlobThreadNumRFI))
         AddUserArgs(*CI);
       return false;
     });
@@ -699,7 +696,7 @@ struct AAICVTrackerFunction : public AAICVTracker {
     bool Changed = false;
 
     auto ReplaceAndDeleteCB = [&](Use &U, Function &Caller) {
-      CallInst *CI = OpenMPOpt::getCallIfRegularCall(U, &GetterRFI);
+      CallInst *CI = OMPInformationCache::getCallIfRegularCall(U, &GetterRFI);
       Instruction *UserI = cast<Instruction>(U.getUser());
       Value *ReplVal = getReplacementValue(ICV, UserI, A);
 
@@ -737,7 +734,7 @@ struct AAICVTrackerFunction : public AAICVTracker {
       auto &SetterRFI = OMPInfoCache.RFIs[OMPInfoCache.ICVs[ICV].Setter];
 
       auto TrackValues = [&](Use &U, Function &) {
-        CallInst *CI = OpenMPOpt::getCallIfRegularCall(U);
+        CallInst *CI = OMPInformationCache::getCallIfRegularCall(U);
         if (!CI)
           return false;
 
