@@ -8,3 +8,5 @@ add_llvm_unittest(IPOTests
   LowerTypeTests.cpp
   WholeProgramDevirt.cpp
   )
+
+add_subdirectory(OpenMPOpt)
