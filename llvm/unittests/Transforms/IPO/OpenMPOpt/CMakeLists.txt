@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
   Analysis
   AsmParser
   FrontendOpenMP
+  TransformUtils
   )
 
 add_llvm_unittest(OpenMPOptUnitTests
