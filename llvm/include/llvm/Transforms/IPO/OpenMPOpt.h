@@ -136,33 +136,42 @@ struct OMPInformationCache : public InformationCache {
   /// host to device memory offloading.
   struct MemoryTransfer {
     struct OffloadArray {
+      AllocaInst *Array;
       SmallVector<Value *, 8> LastAccesses;
-      SmallVector<Value *, 8> StoredAddresses;
+      SmallVector<Value *, 8> StoredValues;
+      InformationCache &InfoCache;
+
+      OffloadArray(AllocaInst *Array, InformationCache &InfoCache)
+          : Array(Array), InfoCache(InfoCache) {}
+
+      bool getValues(Instruction *Before = nullptr);
+
+    private:
+      bool getLastAccessesToOfflArray(Instruction *Before = nullptr);
+
+      bool getLastStoresInOfflArray();
 
       void initialize(unsigned Size, Value *Values = nullptr) {
         LastAccesses.assign(Size, Values);
-        StoredAddresses.assign(Size, Values);
+        StoredValues.assign(Size, Values);
       }
-
-      unsigned size() { return LastAccesses.size(); }
-      bool isFilledLastAccesses() { return isFilled(LastAccesses); }
-      bool isFilledStoredAddresses() { return isFilled(StoredAddresses); }
-
+      unsigned numValues() { return LastAccesses.size(); }
       static bool isFilled(const SmallVectorImpl<Value *> &V);
     };
 
     CallBase *RuntimeCall;
-    MemorySSA &MSSA;
+    InformationCache &InfoCache;
     std::unique_ptr<OffloadArray> BasePtrs;
     std::unique_ptr<OffloadArray> Ptrs;
     std::unique_ptr<OffloadArray> Sizes;
 
-    MemoryTransfer(CallBase *RuntimeCall, MemorySSA &MSSA) :
-        RuntimeCall{RuntimeCall}, MSSA{MSSA},
-        BasePtrs {std::make_unique<OffloadArray>()},
-        Ptrs {std::make_unique<OffloadArray>()},
-        Sizes {std::make_unique<OffloadArray>()}
+    MemoryTransfer(CallBase *RuntimeCall, InformationCache &InfoCache) :
+        RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
     {}
+
+    /// Gets the values stored in the offload arrays. Returns false if some of
+    /// the values couldn't be found.
+    bool getValuesInOfflArrays();
   };
 
   /// The slice of the module we are allowed to look at.
@@ -211,10 +220,6 @@ struct OpenMPOpt {
   /// Run all OpenMP optimizations on the underlying SCC/ModuleSlice.
   bool run();
 
-  /// Gets the values stored in the offload arrays specified by \p MT. Returns
-  /// false if some of the values couldn't be found.
-  bool getValuesInOfflArrays(MemoryTransfer &MT);
-
   /// Return the call if \p U is a callee use in a regular call. If \p RFI is
   /// given it has to be the callee or a nullptr is returned.
   static CallInst *getCallIfRegularCall(
@@ -225,6 +230,12 @@ struct OpenMPOpt {
   static CallInst *getCallIfRegularCall(
       Value &V, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr);
 
+  /// Returns the integer representation of \p V.
+  static uint64_t getIntLiteral(const Value *V) {
+    assert(V && "Getting Integer value of nullptr");
+    return (dyn_cast<ConstantInt>(V))->getZExtValue();
+  }
+
 private:
   /// Try to delete parallel regions if possible.
   bool deleteParallelRegions();
@@ -234,17 +245,6 @@ private:
 
   /// Splits a runtime call that involves a host to device transfer into its ""
   bool splitMemoryTransfer(MemoryTransfer &MT);
-
-  /// Gets the values stored in \p OfflArray and stores them in \p Dst.
-  /// \p Before serves as a lower bound, so don't look at accesses after that.
-  bool getValuesInOfflArray(Value *OfflArray, MemoryTransfer::OffloadArray &Dst,
-                            Instruction *Before = nullptr);
-
-  bool getLastAccessesToOfflArray(AllocaInst *OfflArray,
-                                  SmallVectorImpl<Value *> &LastAccesses,
-                                  Instruction *Before = nullptr);
-
-  bool getLastStoresInOfflArray(MemoryTransfer::OffloadArray &Dst);
 
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);
@@ -318,12 +318,6 @@ private:
   /// Populate the Attributor with abstract attribute opportunities in the
   /// function.
   void registerAAs();
-
-  /// Returns the integer representation of \p V.
-  static uint64_t getIntLiteral(const Value *V) {
-    assert(V && "Getting Integer value of nullptr");
-    return (dyn_cast<ConstantInt>(V))->getZExtValue();
-  }
 };
 
 /// Helper to remember if the module contains OpenMP (runtime calls), to be used
