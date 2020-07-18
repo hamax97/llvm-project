@@ -12,7 +12,6 @@ namespace {
 
 class HideMemTransferLatencyTest : public OpenMPOptTest {
 protected:
-  NiceMock<MockFunctionPass> MFP;
   NiceMock<MockModulePass> MMP;
   MockSCCPass MSCCP;
   ModulePassManager MPM;
@@ -42,14 +41,9 @@ protected:
     FAM.registerPass([&] { return CGSCCAnalysisManagerFunctionProxy(CGAM); });
     FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(MAM); });
 
-//    FunctionPassManager FPM;
-//    FPM.addPass(MFP.getPass());
-
     CGSCCPassManager CGPM;
     CGPM.addPass(MSCCP.getPass());
-//    CGPM.addPass(createCGSCCToFunctionPassAdaptor(std::move(FPM)));
 
-    //MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
     MPM.addPass(createModuleToPostOrderCGSCCPassAdaptor(std::move(CGPM)));
   }
 };
