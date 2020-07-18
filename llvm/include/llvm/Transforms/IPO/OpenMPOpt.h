@@ -138,6 +138,17 @@ struct OMPInformationCache : public InformationCache {
     struct OffloadArray {
       SmallVector<Value *, 8> LastAccesses;
       SmallVector<Value *, 8> StoredAddresses;
+
+      void initialize(unsigned Size, Value *Values = nullptr) {
+        LastAccesses.assign(Size, Values);
+        StoredAddresses.assign(Size, Values);
+      }
+
+      unsigned size() { return LastAccesses.size(); }
+      bool isFilledLastAccesses() { return isFilled(LastAccesses); }
+      bool isFilledStoredAddresses() { return isFilled(StoredAddresses); }
+
+      static bool isFilled(const SmallVectorImpl<Value *> &V);
     };
 
     CallBase *RuntimeCall;
@@ -152,8 +163,6 @@ struct OMPInformationCache : public InformationCache {
         Ptrs {std::make_unique<OffloadArray>()},
         Sizes {std::make_unique<OffloadArray>()}
     {}
-
-    static bool isFilled(OffloadArray &OA);
   };
 
   /// The slice of the module we are allowed to look at.
@@ -226,8 +235,16 @@ private:
   /// Splits a runtime call that involves a host to device transfer into its ""
   bool splitMemoryTransfer(MemoryTransfer &MT);
 
+  /// Gets the values stored in \p OfflArray and stores them in \p Dst.
+  /// \p Before serves as a lower bound, so don't look at accesses after that.
   bool getValuesInOfflArray(Value *OfflArray, MemoryTransfer::OffloadArray &Dst,
-                            User *Before);
+                            Instruction *Before = nullptr);
+
+  bool getLastAccessesToOfflArray(AllocaInst *OfflArray,
+                                  SmallVectorImpl<Value *> &LastAccesses,
+                                  Instruction *Before = nullptr);
+
+  bool getLastStoresInOfflArray(MemoryTransfer::OffloadArray &Dst);
 
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);

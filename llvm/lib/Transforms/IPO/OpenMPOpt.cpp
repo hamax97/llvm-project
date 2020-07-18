@@ -97,6 +97,9 @@ template <> struct DenseMapInfo<ICVValue> {
 // Definitions of the OMPInformationCache helper structure.
 //===----------------------------------------------------------------------===//
 
+using MemoryTransfer = OMPInformationCache::MemoryTransfer;
+using OffloadArray = MemoryTransfer::OffloadArray;
+
 void OMPInformationCache::RuntimeFunctionInfo::foreachUse(
     function_ref<bool(Use &, Function &)> CB, Function *F, UseVector *Uses) {
   SmallVector<unsigned, 8> ToBeDeleted;
@@ -236,14 +239,11 @@ bool OMPInformationCache::declMatchesRTFTypes(
   return true;
 }
 
-bool OMPInformationCache::MemoryTransfer::isFilled(OffloadArray &OA) {
-  for (auto *Acc : OA.LastAccesses)
-    if (!Acc)
+bool OffloadArray::isFilled(const SmallVectorImpl<Value *> &V) {
+  for (auto *E : V)
+    if (!E)
       return false;
 
-  for (auto *Addr : OA.StoredAddresses)
-    if (!Addr)
-      return false;
   return true;
 }
 
@@ -623,41 +623,45 @@ bool OpenMPOpt::getValuesInOfflArrays(MemoryTransfer &MT) {
 
   // Get values stored in **offload_baseptrs.
   auto *V = GetUnderlyingObject(BasePtrsArg->get(), DL);
-  bool Success = getValuesInOfflArray(V, *MT.BasePtrs, RuntimeCall);
-  if (!Success) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs in call to "
-                      << RuntimeCall->getName() << " in function "
-                      << RuntimeCall->getCaller()->getName() << "\n");
-    return false;
+  if (!isa<GlobalValue>(V)) {
+    bool Success = getValuesInOfflArray(V, *MT.BasePtrs, RuntimeCall);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs in call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
   }
 
   // Get values stored in **offload_ptrs.
   V = GetUnderlyingObject(PtrsArg->get(), DL);
-  Success = getValuesInOfflArray(V, *MT.Ptrs, RuntimeCall);
-  if (!Success) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs in call to "
-                      << RuntimeCall->getName() << " in function "
-                      << RuntimeCall->getCaller()->getName() << "\n");
-    return false;
+  if (!isa<GlobalValue>(V)) {
+    bool Success = getValuesInOfflArray(V, *MT.Ptrs, RuntimeCall);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs in call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
   }
 
   // Get values stored in **offload_sizes.
   V = GetUnderlyingObject(SizesArg->get(), DL);
-  Success = getValuesInOfflArray(V, *MT.Sizes, RuntimeCall);
-  if (!Success) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_sizes in call to "
-                      << RuntimeCall->getName() << " in function "
-                      << RuntimeCall->getCaller()->getName() << "\n");
-    return false;
+  if (!isa<GlobalValue>(V)) {
+    bool Success = getValuesInOfflArray(V, *MT.Sizes, RuntimeCall);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_sizes in call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
   }
   return true;
 }
 
-/// Gets the values stored in \p OfflArray and stores them in \p Dst.
-/// \p Before serves as a lower bound, so don't look at accesses after that.
 bool OpenMPOpt::getValuesInOfflArray(
-    Value *OfflArray, MemoryTransfer::OffloadArray &Dst, User *Before) {
-  assert(OfflArray && "Can't get values in nullptr!");
+    Value *OfflArray, MemoryTransfer::OffloadArray &Dst, Instruction *Before) {
+  assert(OfflArray && "Can't get values of nullptr!");
 
   if (!isa<AllocaInst>(OfflArray)) {
     LLVM_DEBUG(dbgs() << TAG << "Only alloca arrays supported.\n");
@@ -667,33 +671,71 @@ bool OpenMPOpt::getValuesInOfflArray(
   auto *ArrayAlloc = cast<AllocaInst>(OfflArray);
   const uint64_t NumValues =
       ArrayAlloc->getAllocatedType()->getArrayNumElements();
+  Dst.initialize(NumValues);
 
-  auto &LastAccesses = Dst.LastAccesses;
-  auto &StoredAddresses = Dst.StoredAddresses;
-  LastAccesses.assign(NumValues, nullptr);
-  StoredAddresses.assign(NumValues, nullptr);
+  return getLastAccessesToOfflArray(ArrayAlloc, Dst.LastAccesses, Before) &&
+      getLastStoresInOfflArray(Dst);
+}
 
-  // Get last accesses to the array right before Before.
-  for (auto *Usr : OfflArray->users()) {
-    // If reached lower limit.
-    if (Before && Usr == Before)
-      break;
+bool OpenMPOpt::getLastAccessesToOfflArray(
+    AllocaInst *OfflArray, SmallVectorImpl<Value *> &LastAccesses,
+    Instruction *Before) {
+  assert(OfflArray && "Can't get accesses to nullptr!");
 
-    auto *Access = dyn_cast<GetElementPtrInst>(Usr);
-    if (!Access)
-      continue;
-
-    auto *ArrayIdx = Access->idx_begin() + 1;
-    if (ArrayIdx == Access->idx_end())
-      continue;
-
-    const uint64_t IdxLiteral = getIntLiteral(ArrayIdx->get());
-    LastAccesses[IdxLiteral] = Usr;
+  auto *DT =
+      OMPInfoCache.getAnalysisResultForFunction<DominatorTreeAnalysis>(
+          *OfflArray->getFunction());
+  if (Before && !DT) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't find DominatorTreeAnalysis.\n");
+    return false;
   }
 
-  // Get stored addresses.
+  OfflArray->reverseUseList(); // To traverse users from top to bottom.
+  for (auto *Usr : OfflArray->users()) {
+    if (!isa<Instruction>(Usr))
+      continue;
+
+    auto *UsrInst = cast<Instruction>(Usr);
+
+    // If reached lower limit.
+    if (Before && !DT->dominates(UsrInst, Before))
+      break;
+
+    if (auto *Access = dyn_cast<GetElementPtrInst>(UsrInst)) {
+      auto *ArrayIdx = Access->idx_begin() + 1;
+      if (ArrayIdx == Access->idx_end())
+        continue;
+
+      const uint64_t IdxLiteral = getIntLiteral(ArrayIdx->get());
+      LastAccesses[IdxLiteral] = UsrInst;
+    } else if (UsrInst->isCast()){
+      // If the access is directly a cast, it means it didn't need the
+      // GEP to the array, which means, an access to the first position
+      // of the array.
+      LastAccesses[0] = UsrInst;
+    } else {
+      LLVM_DEBUG(dbgs() << TAG << "Unrecognized access pattern.\n");
+      return false;
+    }
+  }
+
+  if (!OffloadArray::isFilled(LastAccesses)) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get last accesses to offload array.\n");
+    return false;
+  }
+  return true;
+}
+
+bool OpenMPOpt::getLastStoresInOfflArray(MemoryTransfer::OffloadArray &Dst) {
+  assert(Dst.isFilledLastAccesses() && "LastAccesses must be filled!");
+
+  unsigned NumValues = Dst.size();
+  auto &LastAccesses = Dst.LastAccesses;
+  auto &StoredAddresses = Dst.StoredAddresses;
+
   for (unsigned It = 0; It < NumValues; ++It) {
     auto *Accs = LastAccesses[It];
+    Accs->reverseUseList();
     auto AccsUsr = Accs->user_begin();
     if (AccsUsr == Accs->user_end()) {
       LLVM_DEBUG(dbgs() << TAG << "Useless access to offload array.\n");
@@ -713,11 +755,10 @@ bool OpenMPOpt::getValuesInOfflArray(
         GetUnderlyingObject(AccsUsr->getOperand(0), OMPInfoCache.getDL());
   }
 
-  if (!MemoryTransfer::isFilled(Dst)) {
-    LLVM_DEBUG(dbgs() << TAG << "Didn't get all values in offload array.\n");
+  if (!Dst.isFilledStoredAddresses()) {
+    LLVM_DEBUG(dbgs() << TAG << "Didn't get last stores to offload array.\n");
     return false;
   }
-
   return true;
 }
 
