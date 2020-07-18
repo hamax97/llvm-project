@@ -105,10 +105,6 @@ TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
             AM.getResult<FunctionAnalysisManagerCGSCCProxy>(C, CG).getManager();
 
         AnalysisGetter AG(FAM);
-        auto OREGetter = [&FAM](Function *F) -> OptimizationRemarkEmitter & {
-          return FAM.getResult<OptimizationRemarkEmitterAnalysis>(*F);
-        };
-
         CallGraphUpdater CGUpdater;
         CGUpdater.initialize(CG, C, AM, UR);
 
@@ -117,23 +113,37 @@ TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
         OMPInformationCache InfoCache(*(Functions.back()->getParent()), AG, Allocator,
             /*CGSCC*/ &Functions, ModuleSlice);
         Attributor A(Functions, InfoCache, CGUpdater);
-        OpenMPOpt OMPOpt(SCC, CGUpdater, OREGetter, InfoCache, A);
 
         auto &RFI = InfoCache.RFIs[OMPRTL___tgt_target_data_begin];
         auto GetValuesInOfflArrays = [&](Use &U, Function &Decl) {
           auto *RTCall = OpenMPOpt::getCallIfRegularCall(U, &RFI);
           EXPECT_TRUE(RTCall);
 
-          auto *MSSAResult =
-              InfoCache.getAnalysisResultForFunction<MemorySSAAnalysis>(
-                  *RTCall->getCaller());
-          EXPECT_TRUE(MSSAResult);
+          OMPInformationCache::MemoryTransfer MT(RTCall, InfoCache);
+          bool Success = MT.getValuesInOfflArrays();
+          EXPECT_TRUE(Success);
 
-          auto &MSSA = MSSAResult->getMSSA();
-          OMPInformationCache::MemoryTransfer MT(RTCall, MSSA);
-          OMPOpt.getValuesInOfflArrays(MT);
+          std::string ValueName;
+          raw_string_ostream OS(ValueName);
+          // Check for **offload_baseptrs.
+          auto &BasePtrsValues = MT.BasePtrs->StoredValues;
+          EXPECT_EQ(BasePtrsValues.size(), (size_t) 1);
+          BasePtrsValues[0]->print(OS);
+          EXPECT_STREQ(OS.str().c_str(), "double* %a");
+          ValueName.clear();
 
-          // TODO: Check for the values stored in the offload arrays.
+          // Check for **offload_ptrs.
+          auto &PtrsValues = MT.Ptrs->StoredValues;
+          EXPECT_EQ(PtrsValues.size(), (size_t) 1);
+          PtrsValues[0]->print(OS);
+          EXPECT_STREQ(OS.str().c_str(), "double* %a");
+          ValueName.clear();
+
+          // Check for **offload_sizes.
+          auto &SizesValues = MT.Sizes->StoredValues;
+          EXPECT_EQ(SizesValues.size(), (size_t) 1);
+          SizesValues[0]->print(OS);
+          EXPECT_STREQ(OS.str().c_str(), "  %0 = shl nuw nsw i64 %conv, 3");
 
           return false;
         };
