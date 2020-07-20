@@ -135,27 +135,38 @@ struct OMPInformationCache : public InformationCache {
   /// Used to store information about a runtime call that involves
   /// host to device memory offloading.
   struct MemoryTransfer {
+
+    /// Used to map the values physically (in the IR) stored in an offload
+    /// array, to a vector in memory.
     struct OffloadArray {
-      AllocaInst *Array;
-      SmallVector<Value *, 8> LastAccesses;
-      SmallVector<Value *, 8> StoredValues;
+      AllocaInst &Array; /// Physical array (in the IR).
+      SmallVector<Value *, 8> StoredValues; /// Mapped values.
       InformationCache &InfoCache;
 
-      OffloadArray(AllocaInst *Array, InformationCache &InfoCache)
+      /// Factory function for creating and initializing the OffloadArray with
+      /// the values stored in \p Array before the instruction \p Before is
+      /// reached.
+      /// This MUST be used instead of the constructor.
+      static std::unique_ptr<OffloadArray> initialize(
+          AllocaInst &Array,
+          Instruction &Before,
+          InformationCache &InfoCache);
+
+      /// Use the factory function initialize(...) instead.
+      OffloadArray(AllocaInst &Array, InformationCache &InfoCache)
           : Array(Array), InfoCache(InfoCache) {}
 
-      bool getValues(Instruction *Before = nullptr);
-
     private:
-      bool getLastAccessesToOfflArray(Instruction *Before = nullptr);
+      /// Traverses the BasicBlocks collecting the stores made to
+      /// OffloadArray::Array, leaving OffloadArray::StoredValues with the
+      /// values stored before the instruction \p Before is reached.
+      bool getValues(Instruction &Before);
 
-      bool getLastStoresInOfflArray();
+      /// Returns the index of OffloadArray::Array where the store is being
+      /// made. Returns -1 if the index can't be deduced.
+      int32_t getAccessedIdx(StoreInst &S);
 
-      void initialize(unsigned Size, Value *Values = nullptr) {
-        LastAccesses.assign(Size, Values);
-        StoredValues.assign(Size, Values);
-      }
-      unsigned numValues() { return LastAccesses.size(); }
+      /// Returns true all values in \p V are not nullptrs.
       static bool isFilled(const SmallVectorImpl<Value *> &V);
     };
 
@@ -171,7 +182,7 @@ struct OMPInformationCache : public InformationCache {
 
     /// Gets the values stored in the offload arrays. Returns false if some of
     /// the values couldn't be found.
-    bool getValuesInOfflArrays();
+    bool getValuesInOffloadArrays();
   };
 
   /// The slice of the module we are allowed to look at.
@@ -231,7 +242,7 @@ struct OpenMPOpt {
       Value &V, OMPInformationCache::RuntimeFunctionInfo *RFI = nullptr);
 
   /// Returns the integer representation of \p V.
-  static uint64_t getIntLiteral(const Value *V) {
+  static int64_t getIntLiteral(const Value *V) {
     assert(V && "Getting Integer value of nullptr");
     return (dyn_cast<ConstantInt>(V))->getZExtValue();
   }
@@ -243,8 +254,13 @@ private:
   /// Try to eliminiate runtime calls by reusing existing ones.
   bool deduplicateRuntimeCalls();
 
-  /// Splits a runtime call that involves a host to device transfer into its ""
-  bool splitMemoryTransfer(MemoryTransfer &MT);
+  /// Tries to hide the latency of runtime calls that involve host to
+  /// device memory transfers by splitting them into their "issue" and "wait".
+  /// versions. The "issue" is moved upwards as much as possible. The "wait" is
+  /// moved downards as much as possible. The "issue" issues the memory transfer
+  /// asynchronously, returning a handle. The "wait" waits in the returned
+  /// handle for the memory transfer to finish.
+  bool hideMemTransfersLatency();
 
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);
@@ -263,10 +279,6 @@ private:
   bool deduplicateRuntimeCalls(Function &F,
                                OMPInformationCache::RuntimeFunctionInfo &RFI,
                                Value *ReplVal = nullptr);
-
-  /// Tries to hide the latency of runtime calls that involve host to
-  /// device memory transfers.
-  bool hideMemTransfersLatency();
 
   /// Collect arguments that represent the global thread id in \p GTIdArgs.
   void collectGlobalThreadIdArguments(SmallSetVector<Value *, 16> &GTIdArgs);

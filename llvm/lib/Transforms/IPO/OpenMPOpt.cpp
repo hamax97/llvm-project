@@ -228,7 +228,7 @@ bool OMPInformationCache::declMatchesRTFTypes(
   if (F->arg_size() != RTFArgTypes.size())
     return false;
 
-  auto *RTFTyIt = RTFArgTypes.begin();
+  auto RTFTyIt = RTFArgTypes.begin();
   for (Argument &Arg : F->args()) {
     if (Arg.getType() != *RTFTyIt)
       return false;
@@ -243,142 +243,172 @@ bool OMPInformationCache::declMatchesRTFTypes(
 // Definitions of the MemoryTransfer helper structure.
 //===----------------------------------------------------------------------===//
 
-bool MemoryTransfer::getValuesInOfflArrays() {
-  const unsigned BasePtrsArgNum = 2; // **offload_baseptrs.
-  const unsigned PtrsArgNum = 3; // **offload_ptrs.
-  const unsigned SizesArgNum = 4; // **offload_sizes.
-  auto *BasePtrsArg = RuntimeCall->arg_begin() + BasePtrsArgNum;
-  auto *PtrsArg = RuntimeCall->arg_begin() + PtrsArgNum;
-  auto *SizesArg = RuntimeCall->arg_begin() + SizesArgNum;
-  const auto &DL = InfoCache.getDL();
+bool MemoryTransfer::getValuesInOffloadArrays() {
+  // A runtime call that involves memory offloading looks something like:
+  // call void @__tgt_target_data_begin(arg0, arg1,
+  //   i8** %offload_baseptrs, i8** %offload_ptrs, i64* %offload_sizes,
+  // ...)
+  // So, the idea is to access the allocas that allocate space for these offload
+  // arrays, offload_baseptrs, offload_ptrs, offload_sizes.
+  // Therefore:
+  // i8** %offload_baseptrs.
+  const unsigned BasePtrsArgNum = 2;
+  Use *BasePtrsArg = RuntimeCall->arg_begin() + BasePtrsArgNum;
+  // i8** %offload_ptrs.
+  const unsigned PtrsArgNum = 3;
+  Use *PtrsArg = RuntimeCall->arg_begin() + PtrsArgNum;
+  // i8** %offload_sizes.
+  const unsigned SizesArgNum = 4;
+  Use *SizesArg = RuntimeCall->arg_begin() + SizesArgNum;
+
+  const DataLayout &DL = InfoCache.getDL();
 
   // Get values stored in **offload_baseptrs.
   auto *V = GetUnderlyingObject(BasePtrsArg->get(), DL);
-  if (auto *Array = dyn_cast<AllocaInst>(V)) {
-    BasePtrs = std::make_unique<OffloadArray>(Array, InfoCache);
-    bool Success = BasePtrs->getValues(RuntimeCall);
-    if (!Success) {
-      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs in call to "
-                        << RuntimeCall->getName() << " in function "
-                        << RuntimeCall->getCaller()->getName() << "\n");
-      return false;
-    }
+  if (!isa<AllocaInst>(V)) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs, only"
+                      << " alloca arrays supported. In call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+
+  auto *Array = cast<AllocaInst>(V);
+  BasePtrs = OffloadArray::initialize(*Array, *RuntimeCall, InfoCache);
+  if (!BasePtrs) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_baseptrs in call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
   }
 
   // Get values stored in **offload_ptrs.
   V = GetUnderlyingObject(PtrsArg->get(), DL);
-  if (auto *Array = dyn_cast<AllocaInst>(V)) {
-    Ptrs = std::make_unique<OffloadArray>(Array, InfoCache);
-    bool Success = Ptrs->getValues(RuntimeCall);
-    if (!Success) {
-      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs in call to "
-                        << RuntimeCall->getName() << " in function "
-                        << RuntimeCall->getCaller()->getName() << "\n");
-      return false;
-    }
+  if (!isa<AllocaInst>(V)) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs, only"
+                      << " alloca arrays supported. In call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
+  }
+  Array = cast<AllocaInst>(V);
+  Ptrs = OffloadArray::initialize(*Array, *RuntimeCall, InfoCache);
+  if (!Ptrs) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_ptrs in call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
   }
 
   // Get values stored in **offload_sizes.
   V = GetUnderlyingObject(SizesArg->get(), DL);
-  if (auto *Array = dyn_cast<AllocaInst>(V)) {
-    Sizes = std::make_unique<OffloadArray>(Array, InfoCache);
-    bool Success = Sizes->getValues(RuntimeCall);
-    if (!Success) {
+  // Sometimes the frontend generates this array as a constant global array.
+  if (!isa<GlobalValue>(V)) {
+    if (!isa<AllocaInst>(V)) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_sizes, only"
+                        << " alloca arrays supported. In call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
+
+    Array = cast<AllocaInst>(V);
+    Sizes = OffloadArray::initialize(*Array, *RuntimeCall, InfoCache);
+    if (!Sizes) {
       LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload_sizes in call to "
                         << RuntimeCall->getName() << " in function "
                         << RuntimeCall->getCaller()->getName() << "\n");
       return false;
     }
   }
+
   return true;
 }
 
-bool OffloadArray::getValues(Instruction *Before) {
+std::unique_ptr<OffloadArray> OffloadArray::initialize(
+    AllocaInst &Array, Instruction &Before, InformationCache &InfoCache) {
+  if (!Array.getAllocatedType()->isArrayTy()) {
+    LLVM_DEBUG(dbgs() << TAG << "Allocated type is not array.\n");
+    return nullptr;
+  }
+
+  auto OA = std::make_unique<OffloadArray>(Array, InfoCache);
+  bool Success = OA->getValues(Before);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Error getting values in offload array.\n");
+    return nullptr;
+  }
+
+  return OA;
+}
+
+bool OffloadArray::getValues(Instruction &Before) {
+  // Initialize container.
   const uint64_t NumValues =
-      Array->getAllocatedType()->getArrayNumElements();
-  initialize(NumValues);
+      Array.getAllocatedType()->getArrayNumElements();
+  StoredValues.assign(NumValues, nullptr);
 
-  return getLastAccessesToOfflArray(Before) && getLastStoresInOfflArray();
+  // TODO: This assumes the instruction \p Before is in the same BasicBlock
+  //       as OffloadArray::Array. Make it general, for any control flow graph.
+  auto *BB = Array.getParent();
+  if (BB != Before.getParent()) {
+    LLVM_DEBUG(dbgs() << TAG << "The lower limit instruction is in a"
+                      << " different BasicBlock.\n");
+    return false;
+  }
+
+  const DataLayout &DL = InfoCache.getDL();
+  for (auto &I : *BB) {
+    if (&I == &Before) break;
+
+    if (isa<StoreInst>(&I)) {
+      auto *Dst = GetUnderlyingObject(I.getOperand(1), DL);
+
+      if (Dst == &Array) {
+        int32_t AccessedIdx = getAccessedIdx(*cast<StoreInst>(&I));
+        if (AccessedIdx < 0) {
+          LLVM_DEBUG(dbgs() << TAG << "Unexpected StoreInst\n");
+          return false;
+        }
+
+        StoredValues[AccessedIdx] = GetUnderlyingObject(I.getOperand(0), DL);
+      }
+    }
+  }
+
+  return isFilled(StoredValues);
 }
 
-bool OffloadArray::getLastAccessesToOfflArray(Instruction *Before) {
-  auto *DT =
-      InfoCache.getAnalysisResultForFunction<DominatorTreeAnalysis>(
-          *Array->getFunction());
+int32_t OffloadArray::getAccessedIdx(StoreInst &S) {
+  auto *Dst = S.getOperand(1);
+  if (!isa<Instruction>(Dst)) {
+    LLVM_DEBUG(dbgs() << TAG << "Unrecognized store pattern.\n");
+    return -1;
+  }
+  auto *DstInst = cast<Instruction>(Dst);
 
-  if (Before && !DT) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't find DominatorTreeAnalysis.\n");
-    return false;
+  Value *Access = DstInst;
+  if (DstInst->isCast()) {
+    Access = DstInst->getOperand(0);
+
+    // Direct cast from the AllocaInst, which means a store to the
+    // first position of the array.
+    if (Access == &Array) return 0;
   }
 
-  Array->reverseUseList(); // To traverse users from top to bottom.
-  for (auto *Usr : Array->users()) {
-    if (!isa<Instruction>(Usr))
-      continue;
+  if (!isa<GetElementPtrInst>(Access)) {
+    LLVM_DEBUG(dbgs() << TAG << "Unrecognized store pattern.\n");
+    return -1;
+  }
+  auto *GEPInst = cast<GetElementPtrInst>(Access);
 
-    auto *UsrInst = cast<Instruction>(Usr);
-
-    // If reached lower limit.
-    if (Before && !DT->dominates(UsrInst, Before))
-      break;
-
-    if (auto *Access = dyn_cast<GetElementPtrInst>(UsrInst)) {
-      auto *ArrayIdx = Access->idx_begin() + 1;
-      if (ArrayIdx == Access->idx_end())
-        continue;
-
-      const uint64_t IdxLiteral = OpenMPOpt::getIntLiteral(ArrayIdx->get());
-      LastAccesses[IdxLiteral] = UsrInst;
-    } else if (UsrInst->isCast()){
-      // If the access is directly a cast, it means it didn't need the
-      // GEP to the array, which means, an access to the first position
-      // of the array.
-      LastAccesses[0] = UsrInst;
-    } else {
-      LLVM_DEBUG(dbgs() << TAG << "Unrecognized access pattern.\n");
-      return false;
-    }
+  auto *ArrayIdx = GEPInst->idx_begin() + 1;
+  if (ArrayIdx == GEPInst->idx_end()) {
+    LLVM_DEBUG(dbgs() << TAG << "Unrecognized store pattern.\n");
+    return -1;
   }
 
-  if (!isFilled(LastAccesses)) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't get last accesses to offload array.\n");
-    return false;
-  }
-  return true;
-}
-
-bool OffloadArray::getLastStoresInOfflArray() {
-  assert(isFilled(LastAccesses) && "LastAccesses must be filled!");
-
-  const auto &DL = InfoCache.getDL();
-  unsigned NumValues = numValues();
-  for (unsigned It = 0; It < NumValues; ++It) {
-    auto *Accs = LastAccesses[It];
-    Accs->reverseUseList();
-    auto AccsUsr = Accs->user_begin();
-    if (AccsUsr == Accs->user_end()) {
-      LLVM_DEBUG(dbgs() << TAG << "Useless access to offload array.\n");
-      return false;
-    }
-
-    auto *I = cast<Instruction>(*AccsUsr);
-    if (I->isCast())
-      AccsUsr = I->user_begin();
-
-    if (!isa<StoreInst>(*AccsUsr)) {
-      LLVM_DEBUG(dbgs() << TAG << "Unrecognized access pattern.\n");
-      return false;
-    }
-
-    StoredValues[It] =
-        GetUnderlyingObject(AccsUsr->getOperand(0), DL);
-  }
-
-  if (!isFilled(StoredValues)) {
-    LLVM_DEBUG(dbgs() << TAG << "Didn't get last stores to offload array.\n");
-    return false;
-  }
-  return true;
+  return OpenMPOpt::getIntLiteral(ArrayIdx->get());
 }
 
 bool OffloadArray::isFilled(const SmallVectorImpl<Value *> &V) {
@@ -725,24 +755,17 @@ bool OpenMPOpt::hideMemTransfersLatency() {
       return false;
 
     MemoryTransfer MT(RTCall, OMPInfoCache);
-    Changed = splitMemoryTransfer(MT);
-    return Changed;
+    bool Success = MT.getValuesInOffloadArrays();
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload arrays in call to "
+                        << MT.RuntimeCall->getName() << " in function "
+                        << MT.RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
+    return false;
   };
 
   RFI.foreachUse(SplitDataTransfer);
-  return Changed;
-}
-
-bool OpenMPOpt::splitMemoryTransfer(MemoryTransfer &MT) {
-  bool Changed = false;
-  bool Success = MT.getValuesInOfflArrays();
-  if (!Success) {
-    LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload arrays in call to "
-                      << MT.RuntimeCall->getName() << " in function "
-                      << MT.RuntimeCall->getCaller()->getName() << "\n");
-    return false;
-  }
-
   return Changed;
 }
 

@@ -114,7 +114,7 @@ TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
           EXPECT_TRUE(RTCall);
 
           OMPInformationCache::MemoryTransfer MT(RTCall, InfoCache);
-          bool Success = MT.getValuesInOfflArrays();
+          bool Success = MT.getValuesInOffloadArrays();
           EXPECT_TRUE(Success);
 
           std::string ValueName;
