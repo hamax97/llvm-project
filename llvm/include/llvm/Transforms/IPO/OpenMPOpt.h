@@ -133,7 +133,10 @@ struct OMPInformationCache : public InformationCache {
   };
 
   /// Used to store information about a runtime call that involves
-  /// host to device memory offloading.
+  /// host to device memory offloading. For example:
+  /// __tgt_target_data_begin(...,
+  ///   i8** %offload_baseptrs, i8** %offload_ptrs, i64* %offload_sizes,
+  /// ...)
   struct MemoryTransfer {
 
     /// Used to map the values physically (in the IR) stored in an offload
@@ -170,8 +173,11 @@ struct OMPInformationCache : public InformationCache {
       static bool isFilled(const SmallVectorImpl<Value *> &V);
     };
 
-    CallBase *RuntimeCall;
+    CallBase *RuntimeCall; /// Call that involves a memotry transfer.
     InformationCache &InfoCache;
+
+    /// These help mapping the values in offload_baseptrs, offload_ptrs, and
+    /// offload_sizes, respectively.
     std::unique_ptr<OffloadArray> BasePtrs;
     std::unique_ptr<OffloadArray> Ptrs;
     std::unique_ptr<OffloadArray> Sizes;
@@ -180,8 +186,12 @@ struct OMPInformationCache : public InformationCache {
         RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
     {}
 
-    /// Gets the values stored in the offload arrays. Returns false if some of
-    /// the values couldn't be found.
+    /// Maps the values physically (the IR) stored in the offload arrays
+    /// offload_baseptrs, offload_ptrs, offload_sizes to their corresponding
+    /// members, MemoryTransfer::BasePtrs, MemoryTransfer::Ptrs,
+    /// MemoryTransfer::Sizes.
+    /// Returns false if one of the arrays couldn't be processed or some of the
+    /// values couldn't be found.
     bool getValuesInOffloadArrays();
   };
 
