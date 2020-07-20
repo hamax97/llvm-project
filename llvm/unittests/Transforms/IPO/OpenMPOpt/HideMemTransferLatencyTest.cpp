@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OpenMPOptTest.h"
+#include "llvm/IR/ValueSymbolTable.h"
 
 namespace {
 
@@ -117,27 +118,33 @@ TEST_F(HideMemTransferLatencyTest, GetValuesInOfflArrays) {
           bool Success = MT.getValuesInOffloadArrays();
           EXPECT_TRUE(Success);
 
-          std::string ValueName;
-          raw_string_ostream OS(ValueName);
+          Module &M = *RTCall->getModule();
+          Function &F = *M.getFunction("dataTransferOnly");
+          auto *Arg = F.getArg(0);
+
           // Check for **offload_baseptrs.
           auto &BasePtrsValues = MT.BasePtrs->StoredValues;
           EXPECT_EQ(BasePtrsValues.size(), (size_t) 1);
-          BasePtrsValues[0]->print(OS);
-          EXPECT_STREQ(OS.str().c_str(), "double* %a");
-          ValueName.clear();
+          EXPECT_EQ(BasePtrsValues[0], Arg);
 
           // Check for **offload_ptrs.
           auto &PtrsValues = MT.Ptrs->StoredValues;
           EXPECT_EQ(PtrsValues.size(), (size_t) 1);
-          PtrsValues[0]->print(OS);
-          EXPECT_STREQ(OS.str().c_str(), "double* %a");
-          ValueName.clear();
+          EXPECT_EQ(PtrsValues[0], Arg);
 
           // Check for **offload_sizes.
           auto &SizesValues = MT.Sizes->StoredValues;
           EXPECT_EQ(SizesValues.size(), (size_t) 1);
-          SizesValues[0]->print(OS);
-          EXPECT_STREQ(OS.str().c_str(), "  %0 = shl nuw nsw i64 %conv, 3");
+          std::string ValueName;
+          raw_string_ostream OS(ValueName);
+          for (auto &I : F.getEntryBlock()) {
+            I.print(OS);
+            if (OS.str() == "  %0 = shl nuw nsw i64 %conv, 3") {
+              EXPECT_EQ(&I, SizesValues[0]);
+              break;
+            }
+            ValueName.clear();
+          }
 
           return false;
         };
