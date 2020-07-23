@@ -27,7 +27,7 @@ string(TOUPPER "${LLVM_ENABLE_LTO}" uppercase_LLVM_ENABLE_LTO)
 set(LLVM_PARALLEL_COMPILE_JOBS "" CACHE STRING
   "Define the maximum number of concurrent compilation jobs (Ninja only).")
 if(LLVM_PARALLEL_COMPILE_JOBS)
-  if(NOT CMAKE_MAKE_PROGRAM MATCHES "ninja")
+  if(NOT CMAKE_GENERATOR STREQUAL "Ninja")
     message(WARNING "Job pooling is only available with Ninja generators.")
   else()
     set_property(GLOBAL APPEND PROPERTY JOB_POOLS compile_job_pool=${LLVM_PARALLEL_COMPILE_JOBS})
@@ -37,7 +37,7 @@ endif()
 
 set(LLVM_PARALLEL_LINK_JOBS "" CACHE STRING
   "Define the maximum number of concurrent link jobs (Ninja only).")
-if(CMAKE_MAKE_PROGRAM MATCHES "ninja")
+if(CMAKE_GENERATOR STREQUAL "Ninja")
   if(NOT LLVM_PARALLEL_LINK_JOBS AND uppercase_LLVM_ENABLE_LTO STREQUAL "THIN")
     message(STATUS "ThinLTO provides its own parallel linking - limiting parallel link jobs to 2.")
     set(LLVM_PARALLEL_LINK_JOBS "2")
@@ -671,6 +671,9 @@ if (LLVM_ENABLE_WARNINGS AND (LLVM_COMPILER_IS_GCC_COMPATIBLE OR CLANG_CL))
 
   # Enable -Wdelete-non-virtual-dtor if available.
   add_flag_if_supported("-Wdelete-non-virtual-dtor" DELETE_NON_VIRTUAL_DTOR_FLAG)
+
+  # Enable -Wsuggest-override if available.
+  add_flag_if_supported("-Wsuggest-override" SUGGEST_OVERRIDE_FLAG)
 
   # Check if -Wcomment is OK with an // comment ending with '\' if the next
   # line is also a // comment.

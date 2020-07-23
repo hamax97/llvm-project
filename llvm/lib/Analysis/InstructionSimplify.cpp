@@ -3284,7 +3284,8 @@ static Value *simplifyICmpWithMinMax(CmpInst::Predicate Pred, Value *LHS,
 static Value *simplifyICmpWithDominatingAssume(CmpInst::Predicate Predicate,
                                                Value *LHS, Value *RHS,
                                                const SimplifyQuery &Q) {
-  if (!Q.AC || !Q.CxtI)
+  // Gracefully handle instructions that have not been inserted yet.
+  if (!Q.AC || !Q.CxtI || !Q.CxtI->getParent())
     return nullptr;
 
   for (Value *AssumeBaseOp : {LHS, RHS}) {
@@ -3702,6 +3703,13 @@ static Value *SimplifyFCmpInst(unsigned Predicate, Value *LHS, Value *RHS,
           break;
         }
       }
+
+      // LHS == Inf
+      if (Pred == FCmpInst::FCMP_OEQ && isKnownNeverInfinity(LHS, Q.TLI))
+        return getFalse(RetTy);
+      // LHS != Inf
+      if (Pred == FCmpInst::FCMP_UNE && isKnownNeverInfinity(LHS, Q.TLI))
+        return getTrue(RetTy);
     }
     if (C->isNegative() && !C->isNegZero()) {
       assert(!C->isNaN() && "Unexpected NaN constant!");

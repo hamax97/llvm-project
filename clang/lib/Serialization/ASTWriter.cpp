@@ -81,7 +81,7 @@
 #include "llvm/ADT/PointerIntPair.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
-#include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
@@ -3690,7 +3690,7 @@ ASTWriter::GenerateNameLookupTable(const DeclContext *ConstDC,
 
   // We also build up small sets of the constructor and conversion function
   // names which are visible.
-  llvm::SmallSet<DeclarationName, 8> ConstructorNameSet, ConversionNameSet;
+  llvm::SmallPtrSet<DeclarationName, 8> ConstructorNameSet, ConversionNameSet;
 
   for (auto &Lookup : *DC->buildLookup()) {
     auto &Name = Lookup.first;
@@ -5688,8 +5688,8 @@ void ASTRecordWriter::AddCXXDefinitionData(const CXXRecordDecl *D) {
 
   // getODRHash will compute the ODRHash if it has not been previously computed.
   Record->push_back(D->getODRHash());
-  bool ModulesDebugInfo = Writer->Context->getLangOpts().ModulesDebugInfo &&
-                          Writer->WritingModule && !D->isDependentType();
+  bool ModulesDebugInfo =
+      Writer->Context->getLangOpts().ModulesDebugInfo && !D->isDependentType();
   Record->push_back(ModulesDebugInfo);
   if (ModulesDebugInfo)
     Writer->ModularCodegenDecls.push_back(Writer->GetDeclRef(D));

@@ -5349,6 +5349,15 @@ Sema::SemaBuiltinAtomicOverloaded(ExprResult TheCallResult) {
   // gracefully.
   TheCall->setType(ResultType);
 
+  // Prohibit use of _ExtInt with atomic builtins.
+  // The arguments would have already been converted to the first argument's
+  // type, so only need to check the first argument.
+  const auto *ExtIntValType = ValType->getAs<ExtIntType>();
+  if (ExtIntValType && !llvm::isPowerOf2_64(ExtIntValType->getNumBits())) {
+    Diag(FirstArg->getExprLoc(), diag::err_atomic_builtin_ext_int_size);
+    return ExprError();
+  }
+
   return TheCallResult;
 }
 
@@ -11936,27 +11945,31 @@ static void CheckImplicitConversion(Sema &S, Expr *E, QualType T,
       }
 }
 
-static void CheckConditionalOperator(Sema &S, ConditionalOperator *E,
+static void CheckConditionalOperator(Sema &S, AbstractConditionalOperator *E,
                                      SourceLocation CC, QualType T);
 
 static void CheckConditionalOperand(Sema &S, Expr *E, QualType T,
                                     SourceLocation CC, bool &ICContext) {
   E = E->IgnoreParenImpCasts();
 
-  if (isa<ConditionalOperator>(E))
-    return CheckConditionalOperator(S, cast<ConditionalOperator>(E), CC, T);
+  if (auto *CO = dyn_cast<AbstractConditionalOperator>(E))
+    return CheckConditionalOperator(S, CO, CC, T);
 
   AnalyzeImplicitConversions(S, E, CC);
   if (E->getType() != T)
     return CheckImplicitConversion(S, E, T, CC, &ICContext);
 }
 
-static void CheckConditionalOperator(Sema &S, ConditionalOperator *E,
+static void CheckConditionalOperator(Sema &S, AbstractConditionalOperator *E,
                                      SourceLocation CC, QualType T) {
   AnalyzeImplicitConversions(S, E->getCond(), E->getQuestionLoc());
 
+  Expr *TrueExpr = E->getTrueExpr();
+  if (auto *BCO = dyn_cast<BinaryConditionalOperator>(E))
+    TrueExpr = BCO->getCommon();
+
   bool Suspicious = false;
-  CheckConditionalOperand(S, E->getTrueExpr(), T, CC, Suspicious);
+  CheckConditionalOperand(S, TrueExpr, T, CC, Suspicious);
   CheckConditionalOperand(S, E->getFalseExpr(), T, CC, Suspicious);
 
   if (T->isBooleanType())
@@ -11975,7 +11988,7 @@ static void CheckConditionalOperator(Sema &S, ConditionalOperator *E,
   if (E->getType() == T) return;
 
   Suspicious = false;
-  CheckImplicitConversion(S, E->getTrueExpr()->IgnoreParenImpCasts(),
+  CheckImplicitConversion(S, TrueExpr->IgnoreParenImpCasts(),
                           E->getType(), CC, &Suspicious);
   if (!Suspicious)
     CheckImplicitConversion(S, E->getFalseExpr()->IgnoreParenImpCasts(),
@@ -12038,7 +12051,7 @@ static void AnalyzeImplicitConversions(
 
   // For conditional operators, we analyze the arguments as if they
   // were being fed directly into the output.
-  if (auto *CO = dyn_cast<ConditionalOperator>(SourceExpr)) {
+  if (auto *CO = dyn_cast<AbstractConditionalOperator>(SourceExpr)) {
     CheckConditionalOperator(S, CO, CC, T);
     return;
   }
@@ -13556,12 +13569,14 @@ static getBaseAlignmentAndOffsetFromLValue(const Expr *E, ASTContext &Ctx) {
   }
   case Stmt::MemberExprClass: {
     auto *ME = cast<MemberExpr>(E);
-    if (ME->isArrow())
-      break;
     auto *FD = dyn_cast<FieldDecl>(ME->getMemberDecl());
     if (!FD || FD->getType()->isReferenceType())
       break;
-    auto P = getBaseAlignmentAndOffsetFromLValue(ME->getBase(), Ctx);
+    Optional<std::pair<CharUnits, CharUnits>> P;
+    if (ME->isArrow())
+      P = getBaseAlignmentAndOffsetFromPtr(ME->getBase(), Ctx);
+    else
+      P = getBaseAlignmentAndOffsetFromLValue(ME->getBase(), Ctx);
     if (!P)
       break;
     const ASTRecordLayout &Layout = Ctx.getASTRecordLayout(FD->getParent());
@@ -13624,6 +13639,11 @@ static getBaseAlignmentAndOffsetFromPtr(const Expr *E, ASTContext &Ctx) {
     }
     }
     break;
+  }
+  case Stmt::CXXThisExprClass: {
+    auto *RD = E->getType()->getPointeeType()->getAsCXXRecordDecl();
+    CharUnits Alignment = Ctx.getASTRecordLayout(RD).getNonVirtualAlignment();
+    return std::make_pair(Alignment, CharUnits::Zero());
   }
   case Stmt::UnaryOperatorClass: {
     auto *UO = cast<UnaryOperator>(E);

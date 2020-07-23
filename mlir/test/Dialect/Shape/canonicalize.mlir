@@ -54,7 +54,42 @@ func @f() -> !shape.shape {
   // CHECK: shape.const_shape [7, 2]
   %0 = shape.const_shape [1, 2]
   %1 = shape.const_shape [7, 1]
-  %2 = "shape.broadcast"(%0, %1) : (!shape.shape, !shape.shape) -> !shape.shape
+  %2 = shape.broadcast %0, %1
+  return %2 : !shape.shape
+}
+
+// -----
+
+// Rhs is a scalar.
+// CHECK-LABEL: func @f
+func @f(%arg0 : !shape.shape) -> !shape.shape {
+  // CHECK: return %arg0
+  %0 = shape.const_shape []
+  %1 = shape.broadcast %arg0, %0
+  return %1 : !shape.shape
+}
+
+// -----
+
+// Lhs is a scalar.
+// CHECK-LABEL: func @f
+func @f(%arg0 : !shape.shape) -> !shape.shape {
+  // CHECK: return %arg0
+  %0 = shape.const_shape []
+  %1 = shape.broadcast %0, %arg0
+  return %1 : !shape.shape
+}
+
+// -----
+
+// Lhs is a scalar and rhs is constant.
+// CHECK-LABEL: func @f
+func @f() -> !shape.shape {
+  // CHECK: %[[CST:.*]] = shape.const_shape [1, 2, 3]
+  // CHECK: return %[[CST]]
+  %0 = shape.const_shape []
+  %1 = shape.const_shape [1, 2, 3]
+  %2 = shape.broadcast %0, %1
   return %2 : !shape.shape
 }
 
@@ -66,7 +101,7 @@ func @f() -> !shape.shape {
   // CHECK: shape.broadcast
   %0 = shape.const_shape [2]
   %1 = shape.const_shape [7]
-  %2 = "shape.broadcast"(%0, %1) : (!shape.shape, !shape.shape) -> !shape.shape
+  %2 = shape.broadcast %0, %1
   return %2 : !shape.shape
 }
 
@@ -78,7 +113,7 @@ func @f() -> !shape.shape {
   // CHECK: shape.const_shape [0, 1, 2, 3]
   %lhs = shape.const_shape [0, 1]
   %rhs = shape.const_shape [2, 3]
-  %0 = "shape.concat"(%lhs, %rhs) : (!shape.shape, !shape.shape) -> !shape.shape
+  %0 = shape.concat %lhs, %rhs
   return %0 : !shape.shape
 }
 
@@ -396,15 +431,15 @@ func @f() {
   // CHECK-NEXT: return
   %cs0 = shape.const_shape [3, 1]
   %cs1 = shape.const_shape [1, 5]
-  %0 = shape.cstr_broadcastable %cs0, %cs1
+  %0 = shape.cstr_broadcastable %cs0, %cs1 : !shape.shape, !shape.shape
   "consume.witness"(%0) : (!shape.witness) -> ()
   return
 }
 
 // -----
 // Broadcastable with non-broadcastable constant shapes is always false
-// CHECK-LABEL: func @f
-func @f() {
+// CHECK-LABEL: func @static_non_broadcastable
+func @static_non_broadcastable() {
   // CHECK-NEXT: shape.const_shape
   // CHECK-NEXT: shape.const_shape
   // CHECK-NEXT: shape.cstr_broadcastable
@@ -412,7 +447,7 @@ func @f() {
   // CHECK-NEXT: return
   %cs0 = shape.const_shape [1, 3]
   %cs1 = shape.const_shape [1, 5]
-  %0 = shape.cstr_broadcastable %cs0, %cs1
+  %0 = shape.cstr_broadcastable %cs0, %cs1 : !shape.shape, !shape.shape
   "consume.witness"(%0) : (!shape.witness) -> ()
   return
 }
@@ -426,7 +461,7 @@ func @f(%arg0 : !shape.shape) {
   // CHECK-NEXT: consume.witness
   // CHECK-NEXT: return
   %cs0 = shape.const_shape [1,3]
-  %0 = shape.cstr_broadcastable %arg0, %cs0
+  %0 = shape.cstr_broadcastable %arg0, %cs0 : !shape.shape, !shape.shape
   "consume.witness"(%0) : (!shape.witness) -> ()
   return
 }
@@ -438,7 +473,20 @@ func @f(%arg0 : !shape.shape) {
   // CHECK-NEXT: shape.const_witness true
   // CHECK-NEXT: consume.witness
   // CHECK-NEXT: return
-  %0 = shape.cstr_broadcastable %arg0, %arg0
+  %0 = shape.cstr_broadcastable %arg0, %arg0 : !shape.shape, !shape.shape
+  "consume.witness"(%0) : (!shape.witness) -> ()
+  return
+}
+
+// -----
+
+// Broadcastable canonicalization also works on extent tensors.
+// CHECK-LABEL: func @broadcastable_on_extent_tensors
+func @broadcastable_on_extent_tensors(%arg : tensor<?xindex>) {
+  // CHECK-NEXT: shape.const_witness true
+  // CHECK-NEXT: consume.witness
+  // CHECK-NEXT: return
+  %0 = shape.cstr_broadcastable %arg, %arg : tensor<?xindex>, tensor<?xindex>
   "consume.witness"(%0) : (!shape.witness) -> ()
   return
 }
@@ -451,7 +499,7 @@ func @fold_rank() -> !shape.size {
   // CHECK-DAG: %[[RESULT:.*]] = shape.const_size 5
   // CHECK-DAG: return %[[RESULT]] : !shape.size
   %shape = shape.const_shape [3, 4, 5, 6, 7]
-  %rank = shape.rank %shape
+  %rank = shape.rank %shape : !shape.shape
   return %rank : !shape.size
 }
 
@@ -463,7 +511,7 @@ func @fold_rank() -> !shape.size {
 func @dont_fold_rank(%shape : !shape.shape) -> !shape.size {
   // CHECK-DAG: %[[RESULT:.*]] = shape.rank %[[SHAPE]]
   // CHECK-DAG: return %[[RESULT]] : !shape.size
-  %rank = shape.rank %shape
+  %rank = shape.rank %shape : !shape.shape
   return %rank : !shape.size
 }
 
@@ -472,11 +520,11 @@ func @dont_fold_rank(%shape : !shape.shape) -> !shape.size {
 // Canonicalize `rank` when shape is derived from ranked tensor.
 // CHECK-LABEL: @canonicalize_rank
 func @canonicalize_rank(%arg : tensor<1x2x?xf32>) -> !shape.size {
-// CHECK-DAG: %[[RESULT:.*]] = shape.const_size 3
-// CHECK-DAG: return %[[RESULT]] : !shape.size
-%shape = shape.shape_of %arg : tensor<1x2x?xf32>
-%rank = shape.rank %shape
-return %rank : !shape.size
+  // CHECK-DAG: %[[RESULT:.*]] = shape.const_size 3
+  // CHECK-DAG: return %[[RESULT]] : !shape.size
+  %shape = shape.shape_of %arg : tensor<1x2x?xf32>
+  %rank = shape.rank %shape : !shape.shape
+  return %rank : !shape.size
 }
 
 // -----
@@ -485,12 +533,12 @@ return %rank : !shape.size
 // CHECK-LABEL: @dont_canonicalize_rank
 // CHECK-SAME: (%[[ARG:.*]]: tensor<*xf32>) -> !shape.size
 func @dont_canonicalize_rank(%arg : tensor<*xf32>) -> !shape.size {
-// CHECK-DAG: %[[SHAPE:.*]] = shape.shape_of %[[ARG]] : tensor<*xf32>
-// CHECK-DAG: %[[SIZE:.*]] = shape.rank %[[SHAPE]]
-// CHECK-DAG: return %[[SIZE]] : !shape.size
-%shape = shape.shape_of %arg : tensor<*xf32>
-%rank = shape.rank %shape
-return %rank : !shape.size
+  // CHECK-DAG: %[[SHAPE:.*]] = shape.shape_of %[[ARG]] : tensor<*xf32>
+  // CHECK-DAG: %[[SIZE:.*]] = shape.rank %[[SHAPE]]
+  // CHECK-DAG: return %[[SIZE]] : !shape.size
+  %shape = shape.shape_of %arg : tensor<*xf32>
+  %rank = shape.rank %shape : !shape.shape
+  return %rank : !shape.size
 }
 
 // Canonicalize redundant conversion from `index` to `size` and back.
@@ -515,3 +563,102 @@ func @size_to_index_to_size(%size : !shape.size) -> !shape.size {
   return %result : !shape.size
 }
 
+// -----
+
+// Canonicalize scalar cstr_broadcastable checks
+// CHECK-LABEL: @cstr_broadcastable_scalar
+func @cstr_broadcastable_scalar(%arg0 : tensor<?xf32>) {
+  // CHECK-NEXT: shape.const_witness true
+  // CHECK-NEXT: consume.witness
+  // CHECK-NEXT: return
+  %0 = shape.const_shape []
+  %1 = shape.shape_of %arg0 : tensor<?xf32>
+  %2 = shape.cstr_broadcastable %0, %1 : !shape.shape, !shape.shape
+  "consume.witness"(%2) : (!shape.witness) -> ()
+  return
+}
+
+// -----
+
+// Do not canonicalize cstr_broadcastable checks with 2 unknowns
+// CHECK-LABEL: @cstr_broadcastable_unknown
+func @cstr_broadcastable_unknown(%arg0 : tensor<?xf32>, %arg1 : tensor<?xf32>) {
+  // CHECK-NEXT: shape.shape_of %arg0
+  // CHECK-NEXT: shape.shape_of %arg1
+  // CHECK-NEXT: shape.cstr_broadcastable
+  // CHECK-NEXT: consume.witness
+  // CHECK-NEXT: return
+  %0 = shape.shape_of %arg0 : tensor<?xf32>
+  %1 = shape.shape_of %arg1 : tensor<?xf32>
+  %2 = shape.cstr_broadcastable %0, %1 : !shape.shape, !shape.shape
+  "consume.witness"(%2) : (!shape.witness) -> ()
+  return
+}
+
+// -----
+
+// Scalars are safe to broadcast to unranked sizes.
+// CHECK-LABEL: @cstr_broadcastable_scalar_unranked
+func @cstr_broadcastable_scalar_unranked(%arg0 : tensor<*xf32>, %arg1 : tensor<index>) {
+  // CHECK-NEXT: shape.const_witness true
+  // CHECK-NEXT: consume.witness
+  // CHECK-NEXT: return
+  %0 = shape.shape_of %arg1 : tensor<index>
+  %1 = shape.shape_of %arg0 : tensor<*xf32>
+  %2 = shape.cstr_broadcastable %0, %1 : !shape.shape, !shape.shape
+  "consume.witness"(%2) : (!shape.witness) -> ()
+  return
+}
+
+// -----
+
+// Fold `shape_eq` for equal and constant shapes.
+// CHECK-LABEL: @shape_eq_fold_1
+func @shape_eq_fold_1() -> i1 {
+  // CHECK: %[[RESULT:.*]] = constant true
+  // CHECK: return %[[RESULT]] : i1
+  %a = shape.const_shape [1, 2, 3]
+  %b = shape.const_shape [1, 2, 3]
+  %result = shape.shape_eq %a, %b : !shape.shape, !shape.shape
+  return %result : i1
+}
+
+// -----
+
+// Fold `shape_eq` for different but constant shapes of same length.
+// CHECK-LABEL: @shape_eq_fold_0
+func @shape_eq_fold_0() -> i1 {
+  // CHECK: %[[RESULT:.*]] = constant false
+  // CHECK: return %[[RESULT]] : i1
+  %a = shape.const_shape [1, 2, 3]
+  %b = shape.const_shape [4, 5, 6]
+  %result = shape.shape_eq %a, %b : !shape.shape, !shape.shape
+  return %result : i1
+}
+
+// -----
+
+// Fold `shape_eq` for different but constant shapes of different length.
+// CHECK-LABEL: @shape_eq_fold_0
+func @shape_eq_fold_0() -> i1 {
+  // CHECK: %[[RESULT:.*]] = constant false
+  // CHECK: return %[[RESULT]] : i1
+  %a = shape.const_shape [1, 2, 3, 4, 5, 6]
+  %b = shape.const_shape [1, 2, 3]
+  %result = shape.shape_eq %a, %b : !shape.shape, !shape.shape
+  return %result : i1
+}
+
+// -----
+
+// Do not fold `shape_eq` for non-constant shapes.
+// CHECK-LABEL: @shape_eq_do_not_fold
+// CHECK-SAME: (%[[A:.*]]: !shape.shape) -> i1
+func @shape_eq_do_not_fold(%a : !shape.shape) -> i1 {
+  // CHECK: %[[B:.*]] = shape.const_shape [4, 5, 6]
+  // CHECK: %[[RESULT:.*]] = shape.shape_eq %[[A]], %[[B]] : !shape.shape, !shape.shape
+  // CHECK: return %[[RESULT]] : i1
+  %b = shape.const_shape [4, 5, 6]
+  %result = shape.shape_eq %a, %b : !shape.shape, !shape.shape
+  return %result : i1
+}

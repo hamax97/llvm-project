@@ -117,9 +117,6 @@ cl::desc("disable sibling call optimization on ppc"), cl::Hidden);
 static cl::opt<bool> DisableInnermostLoopAlign32("disable-ppc-innermost-loop-align32",
 cl::desc("don't always align innermost loop to 32 bytes on ppc"), cl::Hidden);
 
-static cl::opt<bool> EnableQuadPrecision("enable-ppc-quad-precision",
-cl::desc("enable quad precision float support on ppc"), cl::Hidden);
-
 static cl::opt<bool> UseAbsoluteJumpTables("ppc-use-absolute-jumptables",
 cl::desc("use absolute jump tables on ppc"), cl::Hidden);
 
@@ -426,6 +423,9 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
 
   if (Subtarget.hasSPE()) {
     // SPE has built-in conversions
+    setOperationAction(ISD::STRICT_FP_TO_SINT, MVT::i32, Legal);
+    setOperationAction(ISD::STRICT_SINT_TO_FP, MVT::i32, Legal);
+    setOperationAction(ISD::STRICT_UINT_TO_FP, MVT::i32, Legal);
     setOperationAction(ISD::FP_TO_SINT, MVT::i32, Legal);
     setOperationAction(ISD::SINT_TO_FP, MVT::i32, Legal);
     setOperationAction(ISD::UINT_TO_FP, MVT::i32, Legal);
@@ -575,9 +575,10 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
       setOperationAction(ISD::SINT_TO_FP, MVT::i32, Custom);
   } else {
     // PowerPC does not have FP_TO_UINT on 32-bit implementations.
-    if (Subtarget.hasSPE())
+    if (Subtarget.hasSPE()) {
+      setOperationAction(ISD::STRICT_FP_TO_UINT, MVT::i32, Legal);
       setOperationAction(ISD::FP_TO_UINT, MVT::i32, Legal);
-    else
+    } else
       setOperationAction(ISD::FP_TO_UINT, MVT::i32, Expand);
   }
 
@@ -1004,61 +1005,59 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
       setOperationAction(ISD::SRL, MVT::v1i128, Legal);
       setOperationAction(ISD::SRA, MVT::v1i128, Expand);
 
-      if (EnableQuadPrecision) {
-        addRegisterClass(MVT::f128, &PPC::VRRCRegClass);
-        setOperationAction(ISD::FADD, MVT::f128, Legal);
-        setOperationAction(ISD::FSUB, MVT::f128, Legal);
-        setOperationAction(ISD::FDIV, MVT::f128, Legal);
-        setOperationAction(ISD::FMUL, MVT::f128, Legal);
-        setOperationAction(ISD::FP_EXTEND, MVT::f128, Legal);
-        // No extending loads to f128 on PPC.
-        for (MVT FPT : MVT::fp_valuetypes())
-          setLoadExtAction(ISD::EXTLOAD, MVT::f128, FPT, Expand);
-        setOperationAction(ISD::FMA, MVT::f128, Legal);
-        setCondCodeAction(ISD::SETULT, MVT::f128, Expand);
-        setCondCodeAction(ISD::SETUGT, MVT::f128, Expand);
-        setCondCodeAction(ISD::SETUEQ, MVT::f128, Expand);
-        setCondCodeAction(ISD::SETOGE, MVT::f128, Expand);
-        setCondCodeAction(ISD::SETOLE, MVT::f128, Expand);
-        setCondCodeAction(ISD::SETONE, MVT::f128, Expand);
+      addRegisterClass(MVT::f128, &PPC::VRRCRegClass);
+      setOperationAction(ISD::FADD, MVT::f128, Legal);
+      setOperationAction(ISD::FSUB, MVT::f128, Legal);
+      setOperationAction(ISD::FDIV, MVT::f128, Legal);
+      setOperationAction(ISD::FMUL, MVT::f128, Legal);
+      setOperationAction(ISD::FP_EXTEND, MVT::f128, Legal);
+      // No extending loads to f128 on PPC.
+      for (MVT FPT : MVT::fp_valuetypes())
+        setLoadExtAction(ISD::EXTLOAD, MVT::f128, FPT, Expand);
+      setOperationAction(ISD::FMA, MVT::f128, Legal);
+      setCondCodeAction(ISD::SETULT, MVT::f128, Expand);
+      setCondCodeAction(ISD::SETUGT, MVT::f128, Expand);
+      setCondCodeAction(ISD::SETUEQ, MVT::f128, Expand);
+      setCondCodeAction(ISD::SETOGE, MVT::f128, Expand);
+      setCondCodeAction(ISD::SETOLE, MVT::f128, Expand);
+      setCondCodeAction(ISD::SETONE, MVT::f128, Expand);
 
-        setOperationAction(ISD::FTRUNC, MVT::f128, Legal);
-        setOperationAction(ISD::FRINT, MVT::f128, Legal);
-        setOperationAction(ISD::FFLOOR, MVT::f128, Legal);
-        setOperationAction(ISD::FCEIL, MVT::f128, Legal);
-        setOperationAction(ISD::FNEARBYINT, MVT::f128, Legal);
-        setOperationAction(ISD::FROUND, MVT::f128, Legal);
+      setOperationAction(ISD::FTRUNC, MVT::f128, Legal);
+      setOperationAction(ISD::FRINT, MVT::f128, Legal);
+      setOperationAction(ISD::FFLOOR, MVT::f128, Legal);
+      setOperationAction(ISD::FCEIL, MVT::f128, Legal);
+      setOperationAction(ISD::FNEARBYINT, MVT::f128, Legal);
+      setOperationAction(ISD::FROUND, MVT::f128, Legal);
 
-        setOperationAction(ISD::SELECT, MVT::f128, Expand);
-        setOperationAction(ISD::FP_ROUND, MVT::f64, Legal);
-        setOperationAction(ISD::FP_ROUND, MVT::f32, Legal);
-        setTruncStoreAction(MVT::f128, MVT::f64, Expand);
-        setTruncStoreAction(MVT::f128, MVT::f32, Expand);
-        setOperationAction(ISD::BITCAST, MVT::i128, Custom);
-        // No implementation for these ops for PowerPC.
-        setOperationAction(ISD::FSIN , MVT::f128, Expand);
-        setOperationAction(ISD::FCOS , MVT::f128, Expand);
-        setOperationAction(ISD::FPOW, MVT::f128, Expand);
-        setOperationAction(ISD::FPOWI, MVT::f128, Expand);
-        setOperationAction(ISD::FREM, MVT::f128, Expand);
+      setOperationAction(ISD::SELECT, MVT::f128, Expand);
+      setOperationAction(ISD::FP_ROUND, MVT::f64, Legal);
+      setOperationAction(ISD::FP_ROUND, MVT::f32, Legal);
+      setTruncStoreAction(MVT::f128, MVT::f64, Expand);
+      setTruncStoreAction(MVT::f128, MVT::f32, Expand);
+      setOperationAction(ISD::BITCAST, MVT::i128, Custom);
+      // No implementation for these ops for PowerPC.
+      setOperationAction(ISD::FSIN, MVT::f128, Expand);
+      setOperationAction(ISD::FCOS, MVT::f128, Expand);
+      setOperationAction(ISD::FPOW, MVT::f128, Expand);
+      setOperationAction(ISD::FPOWI, MVT::f128, Expand);
+      setOperationAction(ISD::FREM, MVT::f128, Expand);
 
-        // Handle constrained floating-point operations of fp128
-        setOperationAction(ISD::STRICT_FADD, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FSUB, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FMUL, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FDIV, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FMA, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FSQRT, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FP_EXTEND, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FP_ROUND, MVT::f64, Legal);
-        setOperationAction(ISD::STRICT_FP_ROUND, MVT::f32, Legal);
-        setOperationAction(ISD::STRICT_FRINT, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FNEARBYINT, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FFLOOR, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FCEIL,  MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FTRUNC, MVT::f128, Legal);
-        setOperationAction(ISD::STRICT_FROUND, MVT::f128, Legal);
-      }
+      // Handle constrained floating-point operations of fp128
+      setOperationAction(ISD::STRICT_FADD, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FSUB, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FMUL, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FDIV, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FMA, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FSQRT, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FP_EXTEND, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FP_ROUND, MVT::f64, Legal);
+      setOperationAction(ISD::STRICT_FP_ROUND, MVT::f32, Legal);
+      setOperationAction(ISD::STRICT_FRINT, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FNEARBYINT, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FFLOOR, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FCEIL, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FTRUNC, MVT::f128, Legal);
+      setOperationAction(ISD::STRICT_FROUND, MVT::f128, Legal);
       setOperationAction(ISD::FP_EXTEND, MVT::v2f32, Custom);
       setOperationAction(ISD::BSWAP, MVT::v8i16, Legal);
       setOperationAction(ISD::BSWAP, MVT::v4i32, Legal);
@@ -1307,20 +1306,18 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
     setTargetDAGCombine(ISD::VSELECT);
   }
 
-  if (EnableQuadPrecision) {
-    setLibcallName(RTLIB::LOG_F128, "logf128");
-    setLibcallName(RTLIB::LOG2_F128, "log2f128");
-    setLibcallName(RTLIB::LOG10_F128, "log10f128");
-    setLibcallName(RTLIB::EXP_F128, "expf128");
-    setLibcallName(RTLIB::EXP2_F128, "exp2f128");
-    setLibcallName(RTLIB::SIN_F128, "sinf128");
-    setLibcallName(RTLIB::COS_F128, "cosf128");
-    setLibcallName(RTLIB::POW_F128, "powf128");
-    setLibcallName(RTLIB::FMIN_F128, "fminf128");
-    setLibcallName(RTLIB::FMAX_F128, "fmaxf128");
-    setLibcallName(RTLIB::POWI_F128, "__powikf2");
-    setLibcallName(RTLIB::REM_F128, "fmodf128");
-  }
+  setLibcallName(RTLIB::LOG_F128, "logf128");
+  setLibcallName(RTLIB::LOG2_F128, "log2f128");
+  setLibcallName(RTLIB::LOG10_F128, "log10f128");
+  setLibcallName(RTLIB::EXP_F128, "expf128");
+  setLibcallName(RTLIB::EXP2_F128, "exp2f128");
+  setLibcallName(RTLIB::SIN_F128, "sinf128");
+  setLibcallName(RTLIB::COS_F128, "cosf128");
+  setLibcallName(RTLIB::POW_F128, "powf128");
+  setLibcallName(RTLIB::FMIN_F128, "fminf128");
+  setLibcallName(RTLIB::FMAX_F128, "fmaxf128");
+  setLibcallName(RTLIB::POWI_F128, "__powikf2");
+  setLibcallName(RTLIB::REM_F128, "fmodf128");
 
   // With 32 condition bits, we don't need to sink (and duplicate) compares
   // aggressively in CodeGenPrep.
@@ -4299,7 +4296,11 @@ SDValue PPCTargetLowering::LowerFormalArguments_64SVR4(
 
   // If the function takes variable number of arguments, make a frame index for
   // the start of the first vararg value... for expansion of llvm.va_start.
-  if (isVarArg) {
+  // On ELFv2ABI spec, it writes:
+  // C programs that are intended to be *portable* across different compilers
+  // and architectures must use the header file <stdarg.h> to deal with variable
+  // argument lists.
+  if (isVarArg && MFI.hasVAStart()) {
     int Depth = ArgOffset;
 
     FuncInfo->setVarArgsFrameIndex(
@@ -5334,13 +5335,18 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
   // On AIX, direct function calls reference the symbol for the function's
   // entry point, which is named by prepending a "." before the function's
   // C-linkage name.
+  const auto getFunctionEntryPointSymbol = [&](StringRef SymName) {
+    auto &Context = DAG.getMachineFunction().getMMI().getContext();
+    return cast<MCSymbolXCOFF>(
+        Context.getOrCreateSymbol(Twine(".") + Twine(SymName)));
+  };
+
   const auto getAIXFuncEntryPointSymbolSDNode =
       [&](StringRef FuncName, bool IsDeclaration,
           const XCOFF::StorageClass &SC) {
-        auto &Context = DAG.getMachineFunction().getMMI().getContext();
+        MCSymbolXCOFF *S = getFunctionEntryPointSymbol(FuncName);
 
-        MCSymbolXCOFF *S = cast<MCSymbolXCOFF>(
-            Context.getOrCreateSymbol(Twine(".") + Twine(FuncName)));
+        auto &Context = DAG.getMachineFunction().getMMI().getContext();
 
         if (IsDeclaration && !S->hasRepresentedCsectSet()) {
           // On AIX, an undefined symbol needs to be associated with a
@@ -5375,22 +5381,21 @@ static SDValue transformCallee(const SDValue &Callee, SelectionDAG &DAG,
 
   if (ExternalSymbolSDNode *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
     const char *SymName = S->getSymbol();
-    if (!Subtarget.isAIXABI())
-      return DAG.getTargetExternalSymbol(SymName, Callee.getValueType(),
-                                         UsePlt ? PPCII::MO_PLT : 0);
-
-    // If there exists a user-declared function whose name is the same as the
-    // ExternalSymbol's, then we pick up the user-declared version.
-    const Module *Mod = DAG.getMachineFunction().getFunction().getParent();
-    if (const Function *F =
-            dyn_cast_or_null<Function>(Mod->getNamedValue(SymName))) {
-      const XCOFF::StorageClass SC =
-          TargetLoweringObjectFileXCOFF::getStorageClassForGlobal(F);
-      return getAIXFuncEntryPointSymbolSDNode(F->getName(), F->isDeclaration(),
-                                              SC);
+    if (Subtarget.isAIXABI()) {
+      // If there exists a user-declared function whose name is the same as the
+      // ExternalSymbol's, then we pick up the user-declared version.
+      const Module *Mod = DAG.getMachineFunction().getFunction().getParent();
+      if (const Function *F =
+              dyn_cast_or_null<Function>(Mod->getNamedValue(SymName))) {
+        const XCOFF::StorageClass SC =
+            TargetLoweringObjectFileXCOFF::getStorageClassForGlobal(F);
+        return getAIXFuncEntryPointSymbolSDNode(F->getName(),
+                                                F->isDeclaration(), SC);
+      }
+      SymName = getFunctionEntryPointSymbol(SymName)->getName().data();
     }
-
-    return getAIXFuncEntryPointSymbolSDNode(SymName, true, XCOFF::C_EXT);
+    return DAG.getTargetExternalSymbol(SymName, Callee.getValueType(),
+                                       UsePlt ? PPCII::MO_PLT : 0);
   }
 
   // No transformation needed.
@@ -8304,7 +8309,7 @@ SDValue PPCTargetLowering::LowerFP_TO_INT(SDValue Op, SelectionDAG &DAG,
                                           const SDLoc &dl) const {
 
   // FP to INT conversions are legal for f128.
-  if (EnableQuadPrecision && (Op->getOperand(0).getValueType() == MVT::f128))
+  if (Op->getOperand(0).getValueType() == MVT::f128)
     return Op;
 
   // Expand ppcf128 to i32 by hand for the benefit of llvm-gcc bootstrap on
@@ -8572,7 +8577,7 @@ SDValue PPCTargetLowering::LowerINT_TO_FP(SDValue Op,
     return LowerINT_TO_FPVector(Op, DAG, dl);
 
   // Conversions to f128 are legal.
-  if (EnableQuadPrecision && (Op.getValueType() == MVT::f128))
+  if (Op.getValueType() == MVT::f128)
     return Op;
 
   if (Subtarget.hasQPX() && Op.getOperand(0).getValueType() == MVT::v4i1) {
@@ -9100,10 +9105,9 @@ SDValue PPCTargetLowering::LowerBITCAST(SDValue Op, SelectionDAG &DAG) const {
   SDLoc dl(Op);
   SDValue Op0 = Op->getOperand(0);
 
-  if (!EnableQuadPrecision ||
-      (Op.getValueType() != MVT::f128 ) ||
+  if ((Op.getValueType() != MVT::f128) ||
       (Op0.getOpcode() != ISD::BUILD_PAIR) ||
-      (Op0.getOperand(0).getValueType() !=  MVT::i64) ||
+      (Op0.getOperand(0).getValueType() != MVT::i64) ||
       (Op0.getOperand(1).getValueType() != MVT::i64))
     return SDValue();
 
@@ -9896,6 +9900,8 @@ SDValue PPCTargetLowering::LowerVECTOR_SHUFFLE(SDValue Op,
   // to vector legalization will not be sent to the target combine. Try to
   // combine it here.
   if (SDValue NewShuffle = combineVectorShuffle(SVOp, DAG)) {
+    if (!isa<ShuffleVectorSDNode>(NewShuffle))
+      return NewShuffle;
     Op = NewShuffle;
     SVOp = cast<ShuffleVectorSDNode>(Op);
     V1 = Op.getOperand(0);
@@ -16369,7 +16375,7 @@ bool PPCTargetLowering::isFMAFasterThanFMulAndFAdd(const Function &F,
   case Type::DoubleTyID:
     return true;
   case Type::FP128TyID:
-    return EnableQuadPrecision && Subtarget.hasP9Vector();
+    return Subtarget.hasP9Vector();
   default:
     return false;
   }

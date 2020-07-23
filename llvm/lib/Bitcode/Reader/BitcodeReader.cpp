@@ -1530,6 +1530,10 @@ static Attribute::AttrKind getAttrFromCode(uint64_t Code) {
     return Attribute::SanitizeMemTag;
   case bitc::ATTR_KIND_PREALLOCATED:
     return Attribute::Preallocated;
+  case bitc::ATTR_KIND_NOUNDEF:
+    return Attribute::NoUndef;
+  case bitc::ATTR_KIND_BYREF:
+    return Attribute::ByRef;
   }
 }
 
@@ -1647,6 +1651,8 @@ Error BitcodeReader::parseAttributeGroupBlock() {
             return Err;
           if (Kind == Attribute::ByVal) {
             B.addByValAttr(HasType ? getTypeByID(Record[++i]) : nullptr);
+          } else if (Kind == Attribute::ByRef) {
+            B.addByRefAttr(getTypeByID(Record[++i]));
           } else if (Kind == Attribute::Preallocated) {
             B.addPreallocatedAttr(getTypeByID(Record[++i]));
           }

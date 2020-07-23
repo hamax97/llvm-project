@@ -1059,7 +1059,7 @@ bool IRTranslator::translateGetElementPtr(const User &U,
   // splat vector.
   unsigned VectorWidth = 0;
   if (auto *VT = dyn_cast<VectorType>(U.getType()))
-    VectorWidth = VT->getNumElements();
+    VectorWidth = cast<FixedVectorType>(VT)->getNumElements();
 
   // We might need to splat the base pointer into a vector if the offsets
   // are vectors.
@@ -1264,6 +1264,8 @@ unsigned IRTranslator::getSimpleIntrinsicOpcode(Intrinsic::ID ID) {
       return TargetOpcode::G_FNEARBYINT;
     case Intrinsic::pow:
       return TargetOpcode::G_FPOW;
+    case Intrinsic::powi:
+      return TargetOpcode::G_FPOWI;
     case Intrinsic::rint:
       return TargetOpcode::G_FRINT;
     case Intrinsic::round:
@@ -1598,6 +1600,7 @@ bool IRTranslator::translateKnownIntrinsic(const CallInst &CI, Intrinsic::ID ID,
   case Intrinsic::sideeffect:
     // Discard annotate attributes, assumptions, and artificial side-effects.
     return true;
+  case Intrinsic::read_volatile_register:
   case Intrinsic::read_register: {
     Value *Arg = CI.getArgOperand(0);
     MIRBuilder
@@ -1946,7 +1949,7 @@ bool IRTranslator::translateInsertElement(const User &U,
                                           MachineIRBuilder &MIRBuilder) {
   // If it is a <1 x Ty> vector, use the scalar as it is
   // not a legal vector type in LLT.
-  if (cast<VectorType>(U.getType())->getNumElements() == 1)
+  if (cast<FixedVectorType>(U.getType())->getNumElements() == 1)
     return translateCopy(U, *U.getOperand(1), MIRBuilder);
 
   Register Res = getOrCreateVReg(U);
@@ -1961,7 +1964,7 @@ bool IRTranslator::translateExtractElement(const User &U,
                                            MachineIRBuilder &MIRBuilder) {
   // If it is a <1 x Ty> vector, use the scalar as it is
   // not a legal vector type in LLT.
-  if (cast<VectorType>(U.getOperand(0)->getType())->getNumElements() == 1)
+  if (cast<FixedVectorType>(U.getOperand(0)->getType())->getNumElements() == 1)
     return translateCopy(U, *U.getOperand(0), MIRBuilder);
 
   Register Res = getOrCreateVReg(U);
