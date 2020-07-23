@@ -144,6 +144,7 @@ struct OMPInformationCache : public InformationCache {
     struct OffloadArray {
       AllocaInst &Array; /// Physical array (in the IR).
       SmallVector<Value *, 8> StoredValues; /// Mapped values.
+      SmallVector<StoreInst *, 8> LastAccesses;
       InformationCache &InfoCache;
 
       /// Factory function for creating and initializing the OffloadArray with
@@ -161,16 +162,17 @@ struct OMPInformationCache : public InformationCache {
 
     private:
       /// Traverses the BasicBlocks collecting the stores made to
-      /// OffloadArray::Array, leaving OffloadArray::StoredValues with the
-      /// values stored before the instruction \p Before is reached.
+      /// Array, leaving StoredValues with the values stored before
+      /// the instruction \p Before is reached.
       bool getValues(Instruction &Before);
 
-      /// Returns the index of OffloadArray::Array where the store is being
+      /// Returns the index of Array where the store is being
       /// made. Returns -1 if the index can't be deduced.
       int32_t getAccessedIdx(StoreInst &S);
 
-      /// Returns true all values in \p V are not nullptrs.
-      static bool isFilled(const SmallVectorImpl<Value *> &V);
+      /// Returns true if all values in StoredValues and
+      /// LastAccesses are not nullptrs.
+      bool isFilled();
     };
 
     CallBase *RuntimeCall; /// Call that involves a memotry transfer.
@@ -178,9 +180,13 @@ struct OMPInformationCache : public InformationCache {
 
     /// These help mapping the values in offload_baseptrs, offload_ptrs, and
     /// offload_sizes, respectively.
-    std::unique_ptr<OffloadArray> BasePtrs;
-    std::unique_ptr<OffloadArray> Ptrs;
-    std::unique_ptr<OffloadArray> Sizes;
+    std::unique_ptr<OffloadArray> BasePtrs = nullptr;
+    std::unique_ptr<OffloadArray> Ptrs = nullptr;
+    std::unique_ptr<OffloadArray> Sizes = nullptr;
+
+    /// Set of instructions that compose the argument setup for the call
+    /// RuntimeCall.
+    SetVector<Instruction *> Issue;
 
     MemoryTransfer(CallBase *RuntimeCall, InformationCache &InfoCache) :
         RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
@@ -188,11 +194,30 @@ struct OMPInformationCache : public InformationCache {
 
     /// Maps the values physically (the IR) stored in the offload arrays
     /// offload_baseptrs, offload_ptrs, offload_sizes to their corresponding
-    /// members, MemoryTransfer::BasePtrs, MemoryTransfer::Ptrs,
-    /// MemoryTransfer::Sizes.
+    /// members, BasePtrs, Ptrs, Sizes.
     /// Returns false if one of the arrays couldn't be processed or some of the
     /// values couldn't be found.
     bool getValuesInOffloadArrays();
+
+    /// Groups the instructions that compose the argument setup for the call
+    /// RuntimeCall.
+    bool detectIssue();
+
+    /// Returns true if \p I might modify some of the values in the
+    /// offload arrays.
+    bool mayBeModifiedBy(Instruction *I);
+
+  private:
+    /// Gets the setup instructions for each of the values in \p OA. These
+    /// instructions are stored into Issue.
+    bool getSetupInstructions(std::unique_ptr<OffloadArray> &OA);
+    /// Gets the setup instructions for the pointer operand of \p S.
+    bool getPointerSetupInstructions(StoreInst *S);
+    /// Gets the setup instructions for the value operand of \p S.
+    bool getValueSetupInstructions(StoreInst *S);
+
+    /// Returns true if \p I may modify one of the values in \p Values.
+    bool mayModify(Instruction *I, SmallVectorImpl<Value *> &Values);
   };
 
   /// The slice of the module we are allowed to look at.
@@ -271,6 +296,10 @@ private:
   /// asynchronously, returning a handle. The "wait" waits in the returned
   /// handle for the memory transfer to finish.
   bool hideMemTransfersLatency();
+
+  /// Returns a pointer to the instruction where the "issue" of \p MT can be
+  /// moved. Returns nullptr if the movement is not possible, or not worth it.
+  Instruction *canBeMovedUpwards(MemoryTransfer &MT);
 
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);
