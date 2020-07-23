@@ -325,6 +325,81 @@ bool MemoryTransfer::getValuesInOffloadArrays() {
   return true;
 }
 
+bool MemoryTransfer::detectIssue() {
+  assert(BasePtrs && Ptrs && "No offload arrays to look at!");
+  errs() << "Detecting issue\n";
+  if (BasePtrs) {
+    bool Success = getSetupInstructions(BasePtrs);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
+                        << "offload_baseptrs. In call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
+  }
+
+  errs() << "Printing issue\n";
+  for (auto *I : Issue) {
+    I->print(errs()); errs() << "\n";
+  }
+  return true;
+}
+
+bool MemoryTransfer::getSetupInstructions(
+    std::unique_ptr<OffloadArray> &OA) {
+  for (auto *S : OA->LastAccesses) {
+    auto *Dst = S->getPointerOperand();
+
+    // TODO: Dst might be a global value. Make it general.
+    if (!isa<Instruction>(Dst))
+      return false;
+
+    auto *DstInst = cast<Instruction>(Dst);
+    if (DstInst->isCast()) {
+      Issue.push_back(DstInst);
+      auto *Casted = DstInst->getOperand(0);
+
+      // TODO: Casted might be a global value. Make it general.
+      if (!isa<Instruction>(Casted))
+        return false;
+
+      DstInst = cast<Instruction>(Casted);
+    }
+
+    if (isa<GetElementPtrInst>(DstInst))
+      Issue.push_back(DstInst);
+
+    Issue.push_back(S);
+    if (!getValueSetupInstructions(S->getValueOperand()))
+      return false;
+  }
+  return true;
+}
+
+bool MemoryTransfer::getValueSetupInstructions(Value *V) {
+  assert(V && "Can't setup instructions of nullptr!");
+  unsigned MaxLookup = 6;
+  for (unsigned I = 0; I < MaxLookup; ++I) {
+    if (isa<AllocaInst>(V) || isa<Argument>(V) || isa<GlobalValue>(V) ||
+        isa<Constant>(V))
+      return true;
+
+    if (!isa<Instruction>(V))
+      return false;
+
+    auto *Inst = cast<Instruction>(V);
+    if (!SetupCache.count(Inst)) {
+      Issue.push_front(Inst);
+      SetupCache.insert(Inst);
+    }
+
+    V = Inst->getOperand(0);
+  }
+
+  return true;
+}
+
 std::unique_ptr<OffloadArray> OffloadArray::initialize(
     AllocaInst &Array, Instruction &Before, InformationCache &InfoCache) {
   if (!Array.getAllocatedType()->isArrayTy()) {
@@ -347,6 +422,7 @@ bool OffloadArray::getValues(Instruction &Before) {
   const uint64_t NumValues =
       Array.getAllocatedType()->getArrayNumElements();
   StoredValues.assign(NumValues, nullptr);
+  LastAccesses.assign(NumValues, nullptr);
 
   // TODO: This assumes the instruction \p Before is in the same BasicBlock
   //       as OffloadArray::Array. Make it general, for any control flow graph.
@@ -361,22 +437,23 @@ bool OffloadArray::getValues(Instruction &Before) {
   for (auto &I : *BB) {
     if (&I == &Before) break;
 
-    if (isa<StoreInst>(&I)) {
-      auto *Dst = GetUnderlyingObject(I.getOperand(1), DL);
+    if (auto *S = dyn_cast<StoreInst>(&I)) {
+      auto *Dst = GetUnderlyingObject(S->getPointerOperand(), DL);
 
       if (Dst == &Array) {
-        int32_t AccessedIdx = getAccessedIdx(*cast<StoreInst>(&I));
-        if (AccessedIdx < 0) {
+        int32_t Idx = getAccessedIdx(*S);
+        if (Idx < 0) {
           LLVM_DEBUG(dbgs() << TAG << "Unexpected StoreInst\n");
           return false;
         }
 
-        StoredValues[AccessedIdx] = GetUnderlyingObject(I.getOperand(0), DL);
+        StoredValues[Idx] = GetUnderlyingObject(S->getValueOperand(), DL);
+        LastAccesses[Idx] = S;
       }
     }
   }
 
-  return isFilled(StoredValues);
+  return isFilled();
 }
 
 int32_t OffloadArray::getAccessedIdx(StoreInst &S) {
@@ -411,10 +488,12 @@ int32_t OffloadArray::getAccessedIdx(StoreInst &S) {
   return OpenMPOpt::getIntLiteral(ArrayIdx->get());
 }
 
-bool OffloadArray::isFilled(const SmallVectorImpl<Value *> &V) {
-  for (auto *E : V)
-    if (!E)
+bool OffloadArray::isFilled() {
+  const unsigned NumValues = StoredValues.size();
+  for (unsigned I = 0; I < NumValues; ++I) {
+    if (!StoredValues[I] || !LastAccesses[I])
       return false;
+  }
 
   return true;
 }
@@ -758,6 +837,14 @@ bool OpenMPOpt::hideMemTransfersLatency() {
     bool Success = MT.getValuesInOffloadArrays();
     if (!Success) {
       LLVM_DEBUG(dbgs() << TAG << "Couldn't get offload arrays in call to "
+                        << MT.RuntimeCall->getName() << " in function "
+                        << MT.RuntimeCall->getCaller()->getName() << "\n");
+      return false;
+    }
+
+    Success = MT.detectIssue();
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't detect issue in call to "
                         << MT.RuntimeCall->getName() << " in function "
                         << MT.RuntimeCall->getCaller()->getName() << "\n");
       return false;

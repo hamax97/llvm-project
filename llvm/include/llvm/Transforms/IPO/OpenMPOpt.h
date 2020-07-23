@@ -144,6 +144,7 @@ struct OMPInformationCache : public InformationCache {
     struct OffloadArray {
       AllocaInst &Array; /// Physical array (in the IR).
       SmallVector<Value *, 8> StoredValues; /// Mapped values.
+      SmallVector<StoreInst *, 8> LastAccesses;
       InformationCache &InfoCache;
 
       /// Factory function for creating and initializing the OffloadArray with
@@ -155,7 +156,7 @@ struct OMPInformationCache : public InformationCache {
           Instruction &Before,
           InformationCache &InfoCache);
 
-      /// Use the factory function initialize(...) instead.
+      /// Use the factory function OffloadArray::initialize instead.
       OffloadArray(AllocaInst &Array, InformationCache &InfoCache)
           : Array(Array), InfoCache(InfoCache) {}
 
@@ -169,8 +170,9 @@ struct OMPInformationCache : public InformationCache {
       /// made. Returns -1 if the index can't be deduced.
       int32_t getAccessedIdx(StoreInst &S);
 
-      /// Returns true all values in \p V are not nullptrs.
-      static bool isFilled(const SmallVectorImpl<Value *> &V);
+      /// Returns true if all values in OffloadArray::StoredValues and
+      /// OffloadArray::LastAccesses are not nullptrs.
+      bool isFilled();
     };
 
     CallBase *RuntimeCall; /// Call that involves a memotry transfer.
@@ -178,9 +180,12 @@ struct OMPInformationCache : public InformationCache {
 
     /// These help mapping the values in offload_baseptrs, offload_ptrs, and
     /// offload_sizes, respectively.
-    std::unique_ptr<OffloadArray> BasePtrs;
-    std::unique_ptr<OffloadArray> Ptrs;
-    std::unique_ptr<OffloadArray> Sizes;
+    std::unique_ptr<OffloadArray> BasePtrs = nullptr;
+    std::unique_ptr<OffloadArray> Ptrs = nullptr;
+    std::unique_ptr<OffloadArray> Sizes = nullptr;
+
+    std::list<Instruction *> Issue;
+    SmallPtrSet<Instruction *, 8> SetupCache;
 
     MemoryTransfer(CallBase *RuntimeCall, InformationCache &InfoCache) :
         RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
@@ -193,6 +198,14 @@ struct OMPInformationCache : public InformationCache {
     /// Returns false if one of the arrays couldn't be processed or some of the
     /// values couldn't be found.
     bool getValuesInOffloadArrays();
+
+    /// Groups the instructions that compose the argument setup for the call
+    /// MemoryTransfer::RuntimeCall.
+    bool detectIssue();
+
+  private:
+    bool getSetupInstructions(std::unique_ptr<OffloadArray> &OA);
+    bool getValueSetupInstructions(Value *V);
   };
 
   /// The slice of the module we are allowed to look at.
