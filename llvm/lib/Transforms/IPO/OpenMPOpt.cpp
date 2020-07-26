@@ -28,6 +28,7 @@
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/MemorySSA.h"
+#include "llvm/Analysis/AliasAnalysis.h"
 
 using namespace llvm;
 using namespace omp;
@@ -327,7 +328,6 @@ bool MemoryTransfer::getValuesInOffloadArrays() {
 
 bool MemoryTransfer::detectIssue() {
   assert(BasePtrs && Ptrs && "No offload arrays to look at!");
-  errs() << "Detecting issue\n";
   if (BasePtrs) {
     bool Success = getSetupInstructions(BasePtrs);
     if (!Success) {
@@ -339,65 +339,146 @@ bool MemoryTransfer::detectIssue() {
     }
   }
 
-  errs() << "Printing issue\n";
-  for (auto *I : Issue) {
-    I->print(errs()); errs() << "\n";
-  }
-  return true;
-}
-
-bool MemoryTransfer::getSetupInstructions(
-    std::unique_ptr<OffloadArray> &OA) {
-  for (auto *S : OA->LastAccesses) {
-    auto *Dst = S->getPointerOperand();
-
-    // TODO: Dst might be a global value. Make it general.
-    if (!isa<Instruction>(Dst))
+  if (Ptrs) {
+    bool Success = getSetupInstructions(Ptrs);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
+                        << "offload_ptrs. In call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
       return false;
-
-    auto *DstInst = cast<Instruction>(Dst);
-    if (DstInst->isCast()) {
-      Issue.push_back(DstInst);
-      auto *Casted = DstInst->getOperand(0);
-
-      // TODO: Casted might be a global value. Make it general.
-      if (!isa<Instruction>(Casted))
-        return false;
-
-      DstInst = cast<Instruction>(Casted);
     }
+  }
 
-    if (isa<GetElementPtrInst>(DstInst))
-      Issue.push_back(DstInst);
-
-    Issue.push_back(S);
-    if (!getValueSetupInstructions(S->getValueOperand()))
+  if (Sizes) {
+    bool Success = getSetupInstructions(Sizes);
+    if (!Success) {
+      LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
+                        << "offload_sizes. In call to "
+                        << RuntimeCall->getName() << " in function "
+                        << RuntimeCall->getCaller()->getName() << "\n");
       return false;
+    }
+  }
+
+  return true;
+}
+
+bool MemoryTransfer::getSetupInstructions(std::unique_ptr<OffloadArray> &OA) {
+  for (auto *S : OA->LastAccesses) {
+    if (!getValueSetupInstructions(S))
+      return false;
+
+    if (!getPointerSetupInstructions(S))
+      return false;
+
+    Issue.insert(S);
   }
   return true;
 }
 
-bool MemoryTransfer::getValueSetupInstructions(Value *V) {
-  assert(V && "Can't setup instructions of nullptr!");
+bool MemoryTransfer::getPointerSetupInstructions(StoreInst *S) {
+  auto *P = S->getPointerOperand();
+
+  // TODO: P might be a global value. Make it general.
+  if (!isa<Instruction>(P))
+    return false;
+
+  auto *DstInst = cast<Instruction>(P);
+  if (isa<GetElementPtrInst>(DstInst)) {
+    Issue.insert(DstInst);
+
+  } else if (DstInst->isCast()) {
+    auto *Casted = DstInst->getOperand(0);
+
+    // TODO: Casted might be a global value. Make it general.
+    if (!isa<Instruction>(Casted))
+      return false;
+
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(Casted))
+      Issue.insert(GEP);
+
+    Issue.insert(DstInst);
+  }
+
+  return true;
+}
+
+bool MemoryTransfer::getValueSetupInstructions(StoreInst *S) {
+  auto *V = S->getValueOperand();
+  // Auxiliary storage to later insert the found instructions in the order
+  // needed.
+  SmallVector<Instruction *, 8> TempStorage;
+  bool Success = false;
   unsigned MaxLookup = 6;
   for (unsigned I = 0; I < MaxLookup; ++I) {
     if (isa<AllocaInst>(V) || isa<Argument>(V) || isa<GlobalValue>(V) ||
-        isa<Constant>(V))
-      return true;
-
-    if (!isa<Instruction>(V))
-      return false;
-
-    auto *Inst = cast<Instruction>(V);
-    if (!SetupCache.count(Inst)) {
-      Issue.push_front(Inst);
-      SetupCache.insert(Inst);
+        isa<Constant>(V)) {
+      Success = true;
+      break;
     }
 
+    if (!isa<Instruction>(V)) {
+      Success = false;
+      break;
+    }
+
+    auto *Inst = cast<Instruction>(V);
+    TempStorage.push_back(Inst);
+
+    // FIXME: Inst might depend on more instructions through its second operand.
     V = Inst->getOperand(0);
   }
 
-  return true;
+  if (Success)
+    while (!TempStorage.empty())
+      Issue.insert(TempStorage.pop_back_val());
+
+  return Success;
+}
+
+bool MemoryTransfer::mayBeModifiedBy(Instruction *I) {
+  assert(BasePtrs && Ptrs && "No offload addresses to analyze!");
+  if (Issue.count(I))
+    return false;
+
+  if (mayModify(I, BasePtrs->StoredValues))
+    return true;
+  if (mayModify(I, Ptrs->StoredValues))
+    return true;
+  if (Sizes) {
+    if (mayModify(I, Sizes->StoredValues))
+      return true;
+  }
+
+  return false;
+}
+
+bool MemoryTransfer::mayModify(Instruction *I,
+                               SmallVectorImpl<Value *> &Values) {
+  assert(I && "Can't analyze nullptr!");
+  auto *AAResults = InfoCache.getAnalysisResultForFunction<AAManager>(
+      *RuntimeCall->getCaller());
+  if (!AAResults) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get AAManager in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return true;
+  }
+
+  const DataLayout &DL = InfoCache.getDL();
+  bool IsStoreInst = isa<StoreInst>(I);
+
+  for (auto *V : Values) {
+    auto AARes = AAResults->alias(I, V);
+    if (AARes >= AliasResult::MayAlias)
+      return true;
+
+    // If \p I is a StoreInst to an offloaded value.
+    if (IsStoreInst &&
+        GetUnderlyingObject(I->getOperand(1), DL) == V)
+      return true;
+  }
+  return false;
 }
 
 std::unique_ptr<OffloadArray> OffloadArray::initialize(
@@ -849,11 +930,47 @@ bool OpenMPOpt::hideMemTransfersLatency() {
                         << MT.RuntimeCall->getCaller()->getName() << "\n");
       return false;
     }
+
+    if (auto *I = canBeMovedUpwards(MT)) {
+      // TODO: Split call and move "issue" below I.
+    }
     return false;
   };
 
   RFI.foreachUse(SplitDataTransfer);
   return Changed;
+}
+
+Instruction *OpenMPOpt::canBeMovedUpwards(MemoryTransfer &MT) {
+  assert(MT.Issue.size() > 0 && "There's not set of instructions to be moved!");
+
+  CallBase *RC = MT.RuntimeCall;
+  auto *MSSAResult =
+      OMPInfoCache.getAnalysisResultForFunction<MemorySSAAnalysis>(
+          *RC->getCaller());
+  if (!MSSAResult) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get MemorySSAAnalysis in function "
+                      << RC->getCaller()->getName() << "\n");
+    return nullptr;
+  }
+
+  auto &MSSA = MSSAResult->getMSSA();
+  auto *MSSAWalker = MSSA.getWalker();
+  const auto *LiveOnEntry = MSSA.getLiveOnEntryDef();
+  auto *MemAccess = MSSAWalker->getClobberingMemoryAccess(RC);
+
+  while (MemAccess != LiveOnEntry) {
+    if (!isa<MemoryDef>(MemAccess))
+      continue;
+
+    auto *MemInst = (cast<MemoryDef>(MemAccess))->getMemoryInst();
+    if (MT.mayBeModifiedBy(MemInst))
+      return MemInst;
+
+    MemAccess = MSSAWalker->getClobberingMemoryAccess(MemAccess);
+  }
+
+  return nullptr;
 }
 
 Value *OpenMPOpt::combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
