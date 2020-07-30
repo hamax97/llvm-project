@@ -328,30 +328,27 @@ bool MemoryTransfer::getValuesInOffloadArrays() {
 
 bool MemoryTransfer::detectIssue() {
   assert(BasePtrs && Ptrs && "No offload arrays to look at!");
-  if (BasePtrs) {
-    bool Success = getSetupInstructions(BasePtrs);
-    if (!Success) {
-      LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
-                        << "offload_baseptrs. In call to "
-                        << RuntimeCall->getName() << " in function "
-                        << RuntimeCall->getCaller()->getName() << "\n");
-      return false;
-    }
+
+  bool Success = getSetupInstructions(BasePtrs);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
+                      << "offload_baseptrs. In call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
   }
 
-  if (Ptrs) {
-    bool Success = getSetupInstructions(Ptrs);
-    if (!Success) {
-      LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
-                        << "offload_ptrs. In call to "
-                        << RuntimeCall->getName() << " in function "
-                        << RuntimeCall->getCaller()->getName() << "\n");
-      return false;
-    }
+  Success = getSetupInstructions(Ptrs);
+  if (!Success) {
+    LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
+                      << "offload_ptrs. In call to "
+                      << RuntimeCall->getName() << " in function "
+                      << RuntimeCall->getCaller()->getName() << "\n");
+    return false;
   }
 
   if (Sizes) {
-    bool Success = getSetupInstructions(Sizes);
+    Success = getSetupInstructions(Sizes);
     if (!Success) {
       LLVM_DEBUG(dbgs() << TAG << "Couldn't get setup instructions of "
                         << "offload_sizes. In call to "
@@ -466,19 +463,31 @@ bool MemoryTransfer::mayModify(Instruction *I,
   }
 
   const DataLayout &DL = InfoCache.getDL();
-  bool IsStoreInst = isa<StoreInst>(I);
 
-  for (auto *V : Values) {
-    auto AARes = AAResults->alias(I, V);
-    if (AARes >= AliasResult::MayAlias)
-      return true;
-
-    // If \p I is a StoreInst to an offloaded value.
-    if (IsStoreInst &&
-        GetUnderlyingObject(I->getOperand(1), DL) == V)
-      return true;
+  if (isa<StoreInst>(I)) {
+    auto *Dst = GetUnderlyingObject(I->getOperand(1), DL);
+    for (auto *V : Values) {
+      if (Dst == V) {
+        errs() << "Inst: "; I->print(errs()); errs() << " may modify: ";
+        V->print(errs()); errs() << "\n";
+        return true;
+      }
+    }
+  } else if (isa<CallInst>(I)) {
+    for (auto *V : Values) {
+      auto ModRefResult = AAResults->getModRefInfo(
+          I, MemoryLocation(V, LocationSize::precise(
+                                   V->getType()->getPrimitiveSizeInBits()))
+          );
+      if (isModSet(ModRefResult)) {
+        errs() << "Inst: "; I->print(errs()); errs() << " may modify: ";
+        V->print(errs()); errs() << "\n";
+        return true;
+      }
+    }
   }
-  return false;
+
+  return true;
 }
 
 std::unique_ptr<OffloadArray> OffloadArray::initialize(
@@ -914,6 +923,7 @@ bool OpenMPOpt::hideMemTransfersLatency() {
     if (!RTCall)
       return false;
 
+    errs() << "---------------------- In function\n"; RTCall->getCaller()->print(errs()); errs() << "\n";
     MemoryTransfer MT(RTCall, OMPInfoCache);
     bool Success = MT.getValuesInOffloadArrays();
     if (!Success) {
