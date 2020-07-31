@@ -468,22 +468,27 @@ bool MemoryTransfer::mayModify(Instruction *I,
     auto *Dst = GetUnderlyingObject(I->getOperand(1), DL);
     for (auto *V : Values) {
       if (Dst == V) {
-        errs() << "Inst: "; I->print(errs()); errs() << " may modify: ";
-        V->print(errs()); errs() << "\n";
         return true;
       }
     }
   } else if (isa<CallInst>(I)) {
     for (auto *V : Values) {
+      // FIXME: This usage of the AAResults is not working properly. It always
+      //        returns that the call instruction I may modify a value V.
+      //        For example:
+      //        define i32 @func(double* noalias %a) {
+      //        ...
+      //        %1 = call i32 @rand()
+      //        ...
+      //        }
+      //        The getModRefInfo always returns that rand() modifies %a, even
+      //        though it has the noalias attribute.
       auto ModRefResult = AAResults->getModRefInfo(
           I, MemoryLocation(V, LocationSize::precise(
                                    V->getType()->getPrimitiveSizeInBits()))
           );
-      if (isModSet(ModRefResult)) {
-        errs() << "Inst: "; I->print(errs()); errs() << " may modify: ";
-        V->print(errs()); errs() << "\n";
+      if (isModSet(ModRefResult))
         return true;
-      }
     }
   }
 
