@@ -29,8 +29,6 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/IR/ValueSymbolTable.h"
-#include "llvm/IR/Type.h"
 
 using namespace llvm;
 using namespace omp;
