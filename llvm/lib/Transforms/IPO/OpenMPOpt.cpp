@@ -29,6 +29,8 @@
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/IR/ValueSymbolTable.h"
+#include "llvm/IR/Type.h"
 
 using namespace llvm;
 using namespace omp;
@@ -253,13 +255,10 @@ bool MemoryTransfer::getValuesInOffloadArrays() {
   // arrays, offload_baseptrs, offload_ptrs, offload_sizes.
   // Therefore:
   // i8** %offload_baseptrs.
-  const unsigned BasePtrsArgNum = 2;
   Use *BasePtrsArg = RuntimeCall->arg_begin() + BasePtrsArgNum;
   // i8** %offload_ptrs.
-  const unsigned PtrsArgNum = 3;
   Use *PtrsArg = RuntimeCall->arg_begin() + PtrsArgNum;
   // i8** %offload_sizes.
-  const unsigned SizesArgNum = 4;
   Use *SizesArg = RuntimeCall->arg_begin() + SizesArgNum;
 
   const DataLayout &DL = InfoCache.getDL();
@@ -337,6 +336,10 @@ bool MemoryTransfer::detectIssue() {
                       << RuntimeCall->getCaller()->getName() << "\n");
     return false;
   }
+  auto *BasePtrsGEP =
+      cast<Instruction>(RuntimeCall->getArgOperand(BasePtrsArgNum));
+  if (!Issue.count(BasePtrsGEP))
+    Issue.insert(BasePtrsGEP);
 
   Success = getSetupInstructions(Ptrs);
   if (!Success) {
@@ -346,6 +349,10 @@ bool MemoryTransfer::detectIssue() {
                       << RuntimeCall->getCaller()->getName() << "\n");
     return false;
   }
+  auto *PtrsGEP =
+      cast<Instruction>(RuntimeCall->getArgOperand(PtrsArgNum));
+  if (!Issue.count(PtrsGEP))
+    Issue.insert(PtrsGEP);
 
   if (Sizes) {
     Success = getSetupInstructions(Sizes);
@@ -356,6 +363,10 @@ bool MemoryTransfer::detectIssue() {
                         << RuntimeCall->getCaller()->getName() << "\n");
       return false;
     }
+    auto *SizesGEP =
+        cast<Instruction>(RuntimeCall->getArgOperand(SizesArgNum));
+    if (!Issue.count(SizesGEP))
+      Issue.insert(SizesGEP);
   }
 
   return true;
@@ -493,6 +504,80 @@ bool MemoryTransfer::mayModify(Instruction *I,
   }
 
   return true;
+}
+
+bool MemoryTransfer::split(Instruction *After, Instruction *Before) {
+  assert((After || Before) &&
+         "Must have a place to move the split runtime call");
+
+  auto *HandleType = getOrCreateHandleType();
+  if (!HandleType)
+    return false;
+
+  auto *M = RuntimeCall->getModule();
+  // Add "issue" runtime call declaration.
+  // declare %struct.tgt_async_info @__tgt_target_data_begin_issue(i64, i32,
+  //   i8**, i8**, i64*, i64*)
+  auto IssueParams = RuntimeCall->getFunctionType()->params();
+  FunctionCallee IssueDecl = M->getOrInsertFunction(
+      "tgt_target_data_begin_issue",
+      FunctionType::get(HandleType, IssueParams, false));
+
+  // Change RuntimeCall callsite for its asynchronous version.
+  RuntimeCall->mutateFunctionType(IssueDecl.getFunctionType());
+  RuntimeCall->setCalledFunction(IssueDecl);
+  Issue.insert(RuntimeCall);
+
+  // Add "wait" runtime call declaration.
+  // declare void @__tgt_target_data_begin_wait(i64, %struct.__tgt_async_info)
+  const unsigned WaitNumParams = 2;
+  Type ** WaitDeclParams = new Type*[WaitNumParams];
+  WaitDeclParams[0] = Type::getInt64Ty(M->getContext());
+  WaitDeclParams[1] = HandleType;
+
+  FunctionCallee WaitDecl = M->getOrInsertFunction(
+      "tgt_target_data_begin_wait",
+      FunctionType::get(
+          Type::getVoidTy(M->getContext()),
+          ArrayRef<Type*>(WaitDeclParams, WaitNumParams), false));
+
+  // Add "wait" call site.
+  Value** WaitParams = new Value*[WaitNumParams];
+  WaitParams[0] = RuntimeCall->getArgOperand(0); // device_id.
+  WaitParams[1] = RuntimeCall; // handle returned.
+  Wait = CallInst::Create(
+      WaitDecl, ArrayRef<Value*>(WaitParams, WaitNumParams), "",
+          (Instruction *)nullptr);
+
+  // Move wait.
+  if (!Before)
+    Wait->insertAfter(RuntimeCall);
+  else
+    Wait->insertBefore(Before);
+
+  if (After)
+    moveIssue(After);
+
+  return true;
+}
+
+Type *MemoryTransfer::getOrCreateHandleType() {
+  auto *M = RuntimeCall->getModule();
+  // If already exists do not create it.
+  for (auto *ST : M->getIdentifiedStructTypes())
+    if (ST->getName() == "struct.tgt_async_info")
+      return ST;
+
+  return StructType::create("struct.tgt_async_info",
+                            Type::getInt8PtrTy(M->getContext()));
+}
+
+void MemoryTransfer::moveIssue(Instruction *After) {
+  for (auto *I : Issue) {
+    I->removeFromParent();
+    I->insertAfter(After);
+    After = I;
+  }
 }
 
 std::unique_ptr<OffloadArray> OffloadArray::initialize(
@@ -945,10 +1030,9 @@ bool OpenMPOpt::hideMemTransfersLatency() {
       return false;
     }
 
-    if (auto *I = canBeMovedUpwards(MT)) {
-      // TODO: Split call and move "issue" below I.
-    }
-    return false;
+    auto *After = canBeMovedUpwards(MT);
+    auto *Before = canBeMovedDownwards(MT);
+    return (After || Before) && MT.split(After, Before);
   };
 
   RFI.foreachUse(SplitDataTransfer);
@@ -958,7 +1042,7 @@ bool OpenMPOpt::hideMemTransfersLatency() {
 Instruction *OpenMPOpt::canBeMovedUpwards(MemoryTransfer &MT) {
   assert(MT.Issue.size() > 0 && "There's not set of instructions to be moved!");
 
-  CallBase *RC = MT.RuntimeCall;
+  CallInst *RC = MT.RuntimeCall;
   auto *MSSAResult =
       OMPInfoCache.getAnalysisResultForFunction<MemorySSAAnalysis>(
           *RC->getCaller());
@@ -985,6 +1069,34 @@ Instruction *OpenMPOpt::canBeMovedUpwards(MemoryTransfer &MT) {
   }
 
   return nullptr;
+}
+
+Instruction *OpenMPOpt::canBeMovedDownwards(MemoryTransfer &MT) {
+  assert(MT.Issue.size() > 0 && "There's not set of instructions to be moved!");
+
+  // FIXME: This traverses only the BasicBlock where MT is. Make it traverse
+  //        the CFG.
+  GlobalValue *TgtTargetDecl = M.getNamedValue("__tgt_target");
+  GlobalValue *TgtTargetTeamsDecl = M.getNamedValue("__tgt_target_teams");
+  GlobalValue *TgtTargetDataEndDecl = M.getNamedValue("__tgt_target_data_end");
+  CallInst *RC = MT.RuntimeCall;
+  auto *I = RC->getNextNode();
+  while (I) {
+    if (auto *C = dyn_cast<CallInst>(I)) {
+      auto *Callee = C->getCalledFunction();
+      if (Callee == TgtTargetDecl)
+        return I;
+      if (Callee == TgtTargetTeamsDecl)
+        return I;
+      if (Callee == TgtTargetDataEndDecl)
+        return I;
+    }
+
+    I = I->getNextNode();
+  }
+
+  // Return end of BasicBlock.
+  return &*(RC->getParent()->end());
 }
 
 Value *OpenMPOpt::combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,

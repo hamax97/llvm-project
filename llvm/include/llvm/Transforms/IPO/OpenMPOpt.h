@@ -175,20 +175,27 @@ struct OMPInformationCache : public InformationCache {
       bool isFilled();
     };
 
-    CallBase *RuntimeCall; /// Call that involves a memotry transfer.
+    CallInst *RuntimeCall; /// Call that involves a memotry transfer.
     InformationCache &InfoCache;
 
     /// These help mapping the values in offload_baseptrs, offload_ptrs, and
     /// offload_sizes, respectively.
+    const unsigned BasePtrsArgNum = 2;
     std::unique_ptr<OffloadArray> BasePtrs = nullptr;
+    const unsigned PtrsArgNum = 3;
     std::unique_ptr<OffloadArray> Ptrs = nullptr;
+    const unsigned SizesArgNum = 4;
     std::unique_ptr<OffloadArray> Sizes = nullptr;
 
     /// Set of instructions that compose the argument setup for the call
     /// RuntimeCall.
     SetVector<Instruction *> Issue;
 
-    MemoryTransfer(CallBase *RuntimeCall, InformationCache &InfoCache) :
+    /// Runtime call that will wait on the handle returned by the runtime call
+    /// in Issue.
+    CallInst *Wait;
+
+    MemoryTransfer(CallInst *RuntimeCall, InformationCache &InfoCache) :
         RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
     {}
 
@@ -207,6 +214,11 @@ struct OMPInformationCache : public InformationCache {
     /// offload arrays.
     bool mayBeModifiedBy(Instruction *I);
 
+    /// Splits this object into its "issue" and "wait" corresponding runtime
+    /// calls. The "issue" is moved after \p After and the "wait" is moved
+    /// before \p Before.
+    bool split(Instruction *After, Instruction *Before);
+
   private:
     /// Gets the setup instructions for each of the values in \p OA. These
     /// instructions are stored into Issue.
@@ -218,6 +230,14 @@ struct OMPInformationCache : public InformationCache {
 
     /// Returns true if \p I may modify one of the values in \p Values.
     bool mayModify(Instruction *I, SmallVectorImpl<Value *> &Values);
+
+    /// Creates the StructureType %struct.tgt_async_info = type { i8* }
+    /// or returns a pointer to it if already exists.
+    Type *getOrCreateHandleType();
+
+    /// Removes from the function all the instructions in Issue and inserts
+    /// them after \p After.
+    void moveIssue(Instruction *After);
   };
 
   /// The slice of the module we are allowed to look at.
@@ -300,6 +320,10 @@ private:
   /// Returns a pointer to the instruction where the "issue" of \p MT can be
   /// moved. Returns nullptr if the movement is not possible, or not worth it.
   Instruction *canBeMovedUpwards(MemoryTransfer &MT);
+
+  /// Returns a pointer to the instruction where the "wait" of \p MT can be
+  /// moved. Returns nullptr if the movement is not possible, or not worth it.
+  Instruction *canBeMovedDownwards(MemoryTransfer &MT);
 
   static Value *combinedIdentStruct(Value *CurrentIdent, Value *NextIdent,
                                     bool GlobalOnly, bool &SingleChoice);
