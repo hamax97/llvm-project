@@ -176,7 +176,7 @@ struct OMPInformationCache : public InformationCache {
     };
 
     CallInst *RuntimeCall; /// Call that involves a memotry transfer.
-    InformationCache &InfoCache;
+    OMPInformationCache &InfoCache;
 
     /// These help mapping the values in offload_baseptrs, offload_ptrs, and
     /// offload_sizes, respectively.
@@ -191,11 +191,7 @@ struct OMPInformationCache : public InformationCache {
     /// RuntimeCall.
     SetVector<Instruction *> Issue;
 
-    /// Runtime call that will wait on the handle returned by the runtime call
-    /// in Issue.
-    CallInst *Wait;
-
-    MemoryTransfer(CallInst *RuntimeCall, InformationCache &InfoCache) :
+    MemoryTransfer(CallInst *RuntimeCall, OMPInformationCache &InfoCache) :
         RuntimeCall{RuntimeCall}, InfoCache{InfoCache}
     {}
 
@@ -230,10 +226,6 @@ struct OMPInformationCache : public InformationCache {
 
     /// Returns true if \p I may modify one of the values in \p Values.
     bool mayModify(Instruction *I, SmallVectorImpl<Value *> &Values);
-
-    /// Creates the StructureType %struct.tgt_async_info = type { i8* }
-    /// or returns a pointer to it if already exists.
-    Type *getOrCreateHandleType();
 
     /// Removes from the function all the instructions in Issue and inserts
     /// them after \p After.

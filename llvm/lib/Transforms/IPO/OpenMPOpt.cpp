@@ -44,6 +44,11 @@ static cl::opt<bool> DisableOpenMPOptimizations(
 static cl::opt<bool> PrintICVValues("openmp-print-icv-values", cl::init(false),
                                     cl::Hidden);
 
+static cl::opt<bool> SplitMemoryTransfers(
+    "openmp-split-memtransfers",
+    cl::desc("Tries to hide the latency of host to device memory transfers"),
+    cl::Hidden, cl::init(false));
+
 STATISTIC(NumOpenMPRuntimeCallsDeduplicated,
           "Number of OpenMP runtime calls deduplicated");
 STATISTIC(NumOpenMPParallelRegionsDeleted,
@@ -336,8 +341,7 @@ bool MemoryTransfer::detectIssue() {
   }
   auto *BasePtrsGEP =
       cast<Instruction>(RuntimeCall->getArgOperand(BasePtrsArgNum));
-  if (!Issue.count(BasePtrsGEP))
-    Issue.insert(BasePtrsGEP);
+  Issue.insert(BasePtrsGEP);
 
   Success = getSetupInstructions(Ptrs);
   if (!Success) {
@@ -349,8 +353,7 @@ bool MemoryTransfer::detectIssue() {
   }
   auto *PtrsGEP =
       cast<Instruction>(RuntimeCall->getArgOperand(PtrsArgNum));
-  if (!Issue.count(PtrsGEP))
-    Issue.insert(PtrsGEP);
+  Issue.insert(PtrsGEP);
 
   if (Sizes) {
     Success = getSetupInstructions(Sizes);
@@ -363,8 +366,7 @@ bool MemoryTransfer::detectIssue() {
     }
     auto *SizesGEP =
         cast<Instruction>(RuntimeCall->getArgOperand(SizesArgNum));
-    if (!Issue.count(SizesGEP))
-      Issue.insert(SizesGEP);
+    Issue.insert(SizesGEP);
   }
 
   return true;
@@ -508,50 +510,46 @@ bool MemoryTransfer::split(Instruction *After, Instruction *Before) {
   assert((After || Before) &&
          "Must have a place to move the split runtime call");
 
-  auto *HandleType = getOrCreateHandleType();
-  if (!HandleType)
-    return false;
-
   auto *M = RuntimeCall->getModule();
+  auto &IRBuilder = InfoCache.OMPBuilder;
   // Add "issue" runtime call declaration.
   // declare %struct.tgt_async_info @__tgt_target_data_begin_issue(i64, i32,
   //   i8**, i8**, i64*, i64*)
-  auto IssueParams = RuntimeCall->getFunctionType()->params();
-  FunctionCallee IssueDecl = M->getOrInsertFunction(
-      "tgt_target_data_begin_issue",
-      FunctionType::get(HandleType, IssueParams, false));
+  FunctionCallee IssueDecl = IRBuilder.getOrCreateRuntimeFunction(
+      *M, OMPRTL___tgt_target_data_begin_issue);
 
   // Change RuntimeCall callsite for its asynchronous version.
-  RuntimeCall->mutateFunctionType(IssueDecl.getFunctionType());
-  RuntimeCall->setCalledFunction(IssueDecl);
-  Issue.insert(RuntimeCall);
+  std::vector<Value *> Args;
+  Args.reserve(RuntimeCall->getNumArgOperands());
+  for (auto &Arg : RuntimeCall->args())
+    Args.push_back(Arg.get());
+
+  CallInst *IssueCallsite = CallInst::Create(
+      IssueDecl, ArrayRef<Value *>(Args), "handle", RuntimeCall);
+  RuntimeCall->removeFromParent();
+  RuntimeCall->deleteValue();
+  Issue.insert(IssueCallsite);
 
   // Add "wait" runtime call declaration.
   // declare void @__tgt_target_data_begin_wait(i64, %struct.__tgt_async_info)
-  const unsigned WaitNumParams = 2;
-  Type ** WaitDeclParams = new Type*[WaitNumParams];
-  WaitDeclParams[0] = Type::getInt64Ty(M->getContext());
-  WaitDeclParams[1] = HandleType;
-
-  FunctionCallee WaitDecl = M->getOrInsertFunction(
-      "tgt_target_data_begin_wait",
-      FunctionType::get(
-          Type::getVoidTy(M->getContext()),
-          ArrayRef<Type*>(WaitDeclParams, WaitNumParams), false));
+  FunctionCallee WaitDecl = IRBuilder.getOrCreateRuntimeFunction(
+      *M, OMPRTL___tgt_target_data_begin_wait);
 
   // Add "wait" call site.
-  Value** WaitParams = new Value*[WaitNumParams];
-  WaitParams[0] = RuntimeCall->getArgOperand(0); // device_id.
-  WaitParams[1] = RuntimeCall; // handle returned.
-  Wait = CallInst::Create(
-      WaitDecl, ArrayRef<Value*>(WaitParams, WaitNumParams), "",
-          (Instruction *)nullptr);
+  const unsigned WaitNumParams = 2;
+  Value *WaitParams[] = {
+      IssueCallsite->getArgOperand(0), // device_id.
+      IssueCallsite // returned handle.
+  };
+  CallInst *WaitCallsite = CallInst::Create(
+      WaitDecl, ArrayRef<Value*>(WaitParams, WaitNumParams), /*NameStr=*/"",
+          /*InsertBefore=*/(Instruction *)nullptr);
 
   // Move wait.
   if (!Before)
-    Wait->insertAfter(RuntimeCall);
+    WaitCallsite->insertAfter(IssueCallsite);
   else
-    Wait->insertBefore(Before);
+    WaitCallsite->insertBefore(Before);
 
   if (After)
     moveIssue(After);
@@ -559,22 +557,11 @@ bool MemoryTransfer::split(Instruction *After, Instruction *Before) {
   return true;
 }
 
-Type *MemoryTransfer::getOrCreateHandleType() {
-  auto *M = RuntimeCall->getModule();
-  // If already exists do not create it.
-  for (auto *ST : M->getIdentifiedStructTypes())
-    if (ST->getName() == "struct.tgt_async_info")
-      return ST;
-
-  return StructType::create("struct.tgt_async_info",
-                            Type::getInt8PtrTy(M->getContext()));
-}
-
 void MemoryTransfer::moveIssue(Instruction *After) {
+  Instruction *Before = After->getNextNode();
   for (auto *I : Issue) {
     I->removeFromParent();
-    I->insertAfter(After);
-    After = I;
+    I->insertBefore(Before);
   }
 }
 
@@ -885,7 +872,9 @@ bool OpenMPOpt::run() {
   Changed |= runAttributor();
   Changed |= deduplicateRuntimeCalls();
   Changed |= deleteParallelRegions();
-  Changed |= hideMemTransfersLatency();
+  if (SplitMemoryTransfers)
+    Changed |= hideMemTransfersLatency();
+
 
   return Changed;
 }
@@ -1060,8 +1049,13 @@ Instruction *OpenMPOpt::canBeMovedUpwards(MemoryTransfer &MT) {
       continue;
 
     auto *MemInst = (cast<MemoryDef>(MemAccess))->getMemoryInst();
-    if (MT.mayBeModifiedBy(MemInst))
-      return MemInst;
+    if (MT.mayBeModifiedBy(MemInst)) {
+      // If MemInst is not the instruction immediately before the Issue.
+      if (!MT.Issue.count(MemInst->getNextNode()))
+        return MemInst;
+
+      return nullptr;
+    }
 
     MemAccess = MSSAWalker->getClobberingMemoryAccess(MemAccess);
   }
