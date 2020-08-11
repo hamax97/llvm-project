@@ -875,7 +875,6 @@ bool OpenMPOpt::run() {
   if (SplitMemoryTransfers)
     Changed |= hideMemTransfersLatency();
 
-
   return Changed;
 }
 
