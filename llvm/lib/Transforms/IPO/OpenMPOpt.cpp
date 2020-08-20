@@ -26,6 +26,7 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/IPO/Attributor.h"
 #include "llvm/Transforms/Utils/CallGraphUpdater.h"
+#include "llvm/Analysis/ValueTracking.h"
 
 using namespace llvm;
 using namespace omp;
@@ -442,6 +443,126 @@ struct OMPInformationCache : public InformationCache {
   SmallPtrSetImpl<Kernel> &Kernels;
 };
 
+/// Used to map the values physically (in the IR) stored in an offload
+/// array, to a vector in memory.
+struct OffloadArray {
+  /// Physical array (in the IR).
+  AllocaInst &Array;
+  /// Mapped values.
+  SmallVector<Value *, 8> StoredValues;
+  /// Last stores made in the offload array.
+  SmallVector<StoreInst *, 8> LastAccesses;
+
+  OffloadArray(AllocaInst &Array) : Array(Array) {}
+
+  /// Factory function for creating and initializing the OffloadArray with
+  /// the values stored in \p Array before the instruction \p Before is
+  /// reached.
+  /// This MUST be used instead of the constructor.
+  static std::unique_ptr<OffloadArray> initialize(
+      AllocaInst &Array, Instruction &Before) {
+    if (!Array.getAllocatedType()->isArrayTy())
+      return nullptr;
+
+    auto OA = std::make_unique<OffloadArray>(Array);
+    if (!OA->getValues(Before))
+      return nullptr;
+
+    return OA;
+  }
+
+  /// Traverses the BasicBlock where Array is, collecting the stores made to
+  /// Array, leaving StoredValues with the values stored before the instruction
+  /// \p Before is reached.
+  bool getValues(Instruction &Before) {
+    // Initialize container.
+    const uint64_t NumValues =
+        Array.getAllocatedType()->getArrayNumElements();
+    StoredValues.assign(NumValues, nullptr);
+    LastAccesses.assign(NumValues, nullptr);
+
+    // TODO: This assumes the instruction \p Before is in the same
+    //  BasicBlock as Array. Make it general, for any control flow graph.
+    BasicBlock *BB = Array.getParent();
+    if (BB != Before.getParent())
+      return false;
+
+    for (Instruction &I : *BB) {
+      if (&I == &Before)
+        break;
+
+      if (!isa<StoreInst>(&I))
+        continue;
+
+      auto *S = cast<StoreInst>(&I);
+      auto *Dst = getUnderlyingObject(S->getPointerOperand());
+      if (Dst == &Array) {
+        int64_t Idx = getAccessedIdx(*S);
+        // Unexpected StoreInst.
+        if (Idx < 0)
+          return false;
+
+        StoredValues[Idx] = getUnderlyingObject(S->getValueOperand());
+        LastAccesses[Idx] = S;
+      }
+    }
+
+    return isFilled();
+  }
+
+  /// Returns the Array's index where the store is being made
+  /// Returns -1 if the index can't be deduced. Assumes \p S as a store
+  /// to Array.
+  int64_t getAccessedIdx(StoreInst &S) {
+    auto *Dst = S.getOperand(1);
+    // Unrecognized store pattern.
+    if (!isa<Instruction>(Dst))
+      return -1;
+
+    auto *DstInst = cast<Instruction>(Dst);
+    Value *Access = DstInst;
+    if (DstInst->isCast()) {
+      Access = DstInst->getOperand(0);
+
+      // Direct cast from the AllocaInst, which means a store to the
+      // first position of the array.
+      if (Access == &Array)
+        return 0;
+    }
+
+    // Unrecognized store pattern.
+    if (!isa<GetElementPtrInst>(Access))
+      return -1;
+
+    auto *GEPInst = cast<GetElementPtrInst>(Access);
+    // Unrecognized store pattern.
+    if (!GEPInst->hasIndices())
+      return -1;
+
+    auto *ArrayIdx = GEPInst->idx_begin() + 1;
+    // Unrecognized store pattern.
+    if (ArrayIdx == GEPInst->idx_end())
+      return -1;
+
+    cast<ConstantInt>(ArrayIdx->get())->getValue();
+    return cast<ConstantInt>(ArrayIdx->get())->getZExtValue();
+  }
+
+  /// Returns true if all values in StoredValues and
+  /// LastAccesses are not nullptrs.
+  bool isFilled() {
+    const unsigned NumValues = StoredValues.size();
+    for (unsigned I = 0; I < NumValues; ++I) {
+      if (!StoredValues[I] || !LastAccesses[I])
+        return false;
+    }
+
+    return true;
+  }
+};
+
+using OffloadArrayPtr = std::unique_ptr<OffloadArray>;
+
 struct OpenMPOpt {
 
   using OptimizationRemarkGetter =
@@ -652,6 +773,11 @@ private:
       if (!RTCall)
         return false;
 
+      OffloadArrayPtr OffloadArrays[3];
+      if (!getValuesInOffloadArrays(*RTCall, OffloadArrays))
+        return false;
+      debugValuesInOffloadArrays(OffloadArrays);
+
       // TODO: Check if can be moved upwards.
       bool WasSplit = false;
       Instruction *WaitMovementPoint = canBeMovedDownwards(*RTCall);
@@ -664,6 +790,94 @@ private:
     RFI.foreachUse(SCC, SplitMemTransfers);
 
     return Changed;
+  }
+
+  /// Maps the values stored in the offload arrays passed as arguments to
+  /// \p RuntimeCall into the offload arrays in \p OAs.
+  bool getValuesInOffloadArrays(CallInst &RuntimeCall,
+                                MutableArrayRef<OffloadArrayPtr> OAs) {
+    assert(OAs.size() == 3 && "Need space for three offload arrays!");
+
+    // A runtime call that involves memory offloading looks something like:
+    // call void @__tgt_target_data_begin_mapper(arg0, arg1,
+    //   i8** %offload_baseptrs, i8** %offload_ptrs, i64* %offload_sizes,
+    // ...)
+    // So, the idea is to access the allocas that allocate space for these
+    // offload arrays, offload_baseptrs, offload_ptrs, offload_sizes.
+    // Therefore:
+    // i8** %offload_baseptrs.
+    const unsigned BasePtrsArgNum = 2;
+    Value *BasePtrsArg = RuntimeCall.getArgOperand(BasePtrsArgNum);
+    // i8** %offload_ptrs.
+    const unsigned PtrsArgNum = 3;
+    Value *PtrsArg = RuntimeCall.getArgOperand(PtrsArgNum);
+    // i8** %offload_sizes.
+    const unsigned SizesArgNum = 4;
+    Value *SizesArg = RuntimeCall.getArgOperand(SizesArgNum);
+
+    // Get values stored in **offload_baseptrs.
+    auto *V = getUnderlyingObject(BasePtrsArg);
+    if (!isa<AllocaInst>(V))
+      return false;
+    auto *BasePtrsArray = cast<AllocaInst>(V);
+    OAs[0] = OffloadArray::initialize(*BasePtrsArray, RuntimeCall);
+    if (!OAs[0])
+      return false;
+
+    // Get values stored in **offload_baseptrs.
+    V = getUnderlyingObject(PtrsArg);
+    if (!isa<AllocaInst>(V))
+      return false;
+    auto *PtrsArray = cast<AllocaInst>(V);
+    OAs[1] = OffloadArray::initialize(*PtrsArray, RuntimeCall);
+    if (!OAs[1])
+      return false;
+
+    // Get values stored in **offload_baseptrs.
+    V = getUnderlyingObject(SizesArg);
+    if (!isa<GlobalValue>(V)) {
+      if (!isa<AllocaInst>(V))
+        return false;
+
+      auto *SizesArray = cast<AllocaInst>(V);
+      OAs[2] = OffloadArray::initialize(*SizesArray, RuntimeCall);
+      if (!OAs[2])
+        return false;
+    }
+
+    return true;
+  }
+
+  /// Prints the values in the OffloadArray \p OAs using LLVM_DEBUG.
+  void debugValuesInOffloadArrays(ArrayRef<OffloadArrayPtr> OAs) {
+    assert(OAs.size() == 3 && "There are three offload arrays to debug!");
+
+    LLVM_DEBUG(dbgs() << TAG << " Successfully got offload values:\n");
+    std::string ValuesStr;
+    raw_string_ostream Printer(ValuesStr);
+    std::string Separator = " --- ";
+
+    for (auto *BP : OAs[0]->StoredValues) {
+      BP->print(Printer);
+      Printer << Separator;
+    }
+    LLVM_DEBUG(dbgs() << "\t\toffload_baseptrs: " << Printer.str() << "\n");
+    ValuesStr.clear();
+
+    for (auto *P : OAs[1]->StoredValues) {
+      P->print(Printer);
+      Printer << Separator;
+    }
+    LLVM_DEBUG(dbgs() << "\t\toffload_ptrs: " << Printer.str() << "\n");
+    ValuesStr.clear();
+
+    if (OAs[2]) {
+      for (auto *S : OAs[2]->StoredValues) {
+        S->print(Printer);
+        Printer << Separator;
+      }
+      LLVM_DEBUG(dbgs() << "\t\toffload_sizes: " << Printer.str() << "\n");
+    }
   }
 
   /// Returns the instruction where the "wait" counterpart \p RuntimeCall can be
