@@ -559,9 +559,162 @@ struct OffloadArray {
 
     return true;
   }
+
+  /// Position of the offload arrays arguments in the runtime call:
+  /// __tgt_target_data_begin_mapper.
+  static const unsigned BasePtrsArgNum = 2;
+  static const unsigned PtrsArgNum = 3;
+  static const unsigned SizesArgNum = 4;
 };
 
 using OffloadArrayPtr = std::unique_ptr<OffloadArray>;
+
+struct MemoryTransfer;
+using MemoryTransferPtr = std::unique_ptr<MemoryTransfer>;
+
+/// Used to store the instructions that serve as setup ("issue") for the
+/// offload arrays that the runtime call __tgt_target_data_begin_mapper has.
+/// __tgt_target_data_begin(...,
+///   i8** %offload_baseptrs, i8** %offload_ptrs, i64* %offload_sizes,
+/// ...)
+struct MemoryTransfer {
+  /// Call to __tgt_target_data_begin_mapper.
+  CallInst &RuntimeCall;
+  /// The values stored in %offload_baseptrs, %offload_ptrs, and %offload_sizes
+  /// (before RuntimeCall is issued) are mapped here, in the first, second, and
+  /// third position, respectively.
+  ArrayRef<OffloadArrayPtr> OffloadArrays;
+  /// Set of instructions that compose the argument setup for RuntimeCall.
+  SetVector<Instruction *> Issue;
+
+  /// Factory function that initializes the MemoryTrasfer by getting the
+  /// instructions that compose the arguments setup ("issue") of RuntimeCall.
+  /// This should be used instead of the constructor.
+  static MemoryTransferPtr initialize(CallInst &RuntimeCall,
+                                      ArrayRef<OffloadArrayPtr> OffloadArrays) {
+
+    assert(OffloadArrays.size() > 2 && OffloadArrays[0] && OffloadArrays[1] &&
+           "No offload arrays to look at!");
+
+    auto MT = std::make_unique<MemoryTransfer>(RuntimeCall, OffloadArrays);
+    if (!MT->detectIssue())
+      return nullptr;
+    return MT;
+  }
+
+  MemoryTransfer(CallInst &RuntimeCall, ArrayRef<OffloadArrayPtr> OffloadArrays)
+      : RuntimeCall(RuntimeCall), OffloadArrays(OffloadArrays) {}
+
+private:
+  /// Groups into Issue the instructions that compose the argument setup for
+  /// RuntimeCall.
+  bool detectIssue() {
+
+    // Get setup instruction for %offload_baseptrs.
+    if (!getSetupInstructions(*OffloadArrays[0]))
+      return false;
+
+    auto *BasePtrsGEP = cast<Instruction>(
+        RuntimeCall.getArgOperand(OffloadArray::BasePtrsArgNum));
+    Issue.insert(BasePtrsGEP);
+
+    // Get setup instruction for %offload_ptrs.
+    if (!getSetupInstructions(*OffloadArrays[1]))
+      return false;
+    auto *PtrsGEP =
+        cast<Instruction>(RuntimeCall.getArgOperand(OffloadArray::PtrsArgNum));
+    Issue.insert(PtrsGEP);
+
+    // Get setup instruction for %offload_sizes.
+    if (OffloadArrays[2]) {
+      if (!getSetupInstructions(*OffloadArrays[2]))
+        return false;
+
+      auto *SizesGEP = cast<Instruction>(
+          RuntimeCall.getArgOperand(OffloadArray::SizesArgNum));
+      Issue.insert(SizesGEP);
+    }
+
+    return true;
+  }
+
+  /// Gets the setup instructions for each of the values in \p OA. These
+  /// instructions are stored into Issue.
+  bool getSetupInstructions(OffloadArray &OA) {
+    for (auto *S : OA.LastAccesses) {
+      if (!getValueSetupInstructions(*S))
+        return false;
+
+      if (!getPointerSetupInstructions(*S))
+        return false;
+
+      Issue.insert(S);
+    }
+    return true;
+  }
+
+  /// Gets the setup instructions for the value operand of \p S.
+  bool getValueSetupInstructions(StoreInst &S) {
+    auto *V = S.getValueOperand();
+    // Auxiliary storage to later insert the found instructions in the order
+    // needed.
+    SmallVector<Instruction *, 8> TempStorage;
+    bool Success = false;
+    unsigned MaxLookup = 6;
+    for (unsigned I = 0; I < MaxLookup; ++I) {
+      if (isa<AllocaInst>(V) || isa<Argument>(V) || isa<GlobalValue>(V) ||
+          isa<Constant>(V)) {
+        Success = true;
+        break;
+      }
+
+      if (!isa<Instruction>(V)) {
+        Success = false;
+        break;
+      }
+
+      auto *Inst = cast<Instruction>(V);
+      TempStorage.push_back(Inst);
+
+      // FIXME: Inst might depend on more instructions through its second operand.
+      V = Inst->getOperand(0);
+    }
+
+    if (Success)
+      while (!TempStorage.empty())
+        Issue.insert(TempStorage.pop_back_val());
+
+    return Success;
+  }
+
+  /// Gets the setup instructions for the pointer operand of \p S.
+  bool getPointerSetupInstructions(StoreInst &S) {
+    auto *P = S.getPointerOperand();
+
+    // TODO: P might be a global value. Make it general.
+    if (!isa<Instruction>(P))
+      return false;
+
+    auto *DstInst = cast<Instruction>(P);
+    if (isa<GetElementPtrInst>(DstInst)) {
+      Issue.insert(DstInst);
+
+    } else if (DstInst->isCast()) {
+      auto *Casted = DstInst->getOperand(0);
+
+      // TODO: Casted might be a global value. Make it general.
+      if (!isa<Instruction>(Casted))
+        return false;
+
+      if (auto *GEP = dyn_cast<GetElementPtrInst>(Casted))
+        Issue.insert(GEP);
+
+      Issue.insert(DstInst);
+    }
+
+    return true;
+  }
+};
 
 struct OpenMPOpt {
 
@@ -778,7 +931,11 @@ private:
         return false;
       debugValuesInOffloadArrays(OffloadArrays);
 
-      // TODO: Check if can be moved upwards.
+      MemoryTransferPtr MT = MemoryTransfer::initialize(*RTCall, OffloadArrays);
+      if (!MT)
+        return false;
+
+      // TODO: Check if MT can be moved upwards.
       bool WasSplit = false;
       Instruction *WaitMovementPoint = canBeMovedDownwards(*RTCall);
       if (WaitMovementPoint)
@@ -806,14 +963,14 @@ private:
     // offload arrays, offload_baseptrs, offload_ptrs, offload_sizes.
     // Therefore:
     // i8** %offload_baseptrs.
-    const unsigned BasePtrsArgNum = 2;
-    Value *BasePtrsArg = RuntimeCall.getArgOperand(BasePtrsArgNum);
+    Value *BasePtrsArg =
+        RuntimeCall.getArgOperand(OffloadArray::BasePtrsArgNum);
     // i8** %offload_ptrs.
-    const unsigned PtrsArgNum = 3;
-    Value *PtrsArg = RuntimeCall.getArgOperand(PtrsArgNum);
+    Value *PtrsArg =
+        RuntimeCall.getArgOperand(OffloadArray::PtrsArgNum);
     // i8** %offload_sizes.
-    const unsigned SizesArgNum = 4;
-    Value *SizesArg = RuntimeCall.getArgOperand(SizesArgNum);
+    Value *SizesArg =
+        RuntimeCall.getArgOperand(OffloadArray::SizesArgNum);
 
     // Get values stored in **offload_baseptrs.
     auto *V = getUnderlyingObject(BasePtrsArg);
