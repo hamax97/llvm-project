@@ -471,6 +471,7 @@ struct OffloadArray {
     return OA;
   }
 
+private:
   /// Traverses the BasicBlock where Array is, collecting the stores made to
   /// Array, leaving StoredValues with the values stored before the instruction
   /// \p Before is reached.
@@ -499,7 +500,7 @@ struct OffloadArray {
       if (Dst == &Array) {
         int64_t Idx = getAccessedIdx(*S);
         // Unexpected StoreInst.
-        if (Idx < 0)
+        if (Idx == -1)
           return false;
 
         StoredValues[Idx] = getUnderlyingObject(S->getValueOperand());
@@ -510,9 +511,8 @@ struct OffloadArray {
     return isFilled();
   }
 
-  /// Returns the Array's index where the store is being made
-  /// Returns -1 if the index can't be deduced. Assumes \p S as a store
-  /// to Array.
+  /// Returns the Array's index where the store is being made. Returns -1 if
+  /// the index can't be deduced. Assumes \p S as a store to Array.
   int64_t getAccessedIdx(StoreInst &S) {
     auto *Dst = S.getOperand(1);
     // Unrecognized store pattern.
@@ -544,7 +544,6 @@ struct OffloadArray {
     if (ArrayIdx == GEPInst->idx_end())
       return -1;
 
-    cast<ConstantInt>(ArrayIdx->get())->getValue();
     return cast<ConstantInt>(ArrayIdx->get())->getZExtValue();
   }
 
@@ -776,7 +775,10 @@ private:
       OffloadArrayPtr OffloadArrays[3];
       if (!getValuesInOffloadArrays(*RTCall, OffloadArrays))
         return false;
+
+#ifndef NDEBUG
       debugValuesInOffloadArrays(OffloadArrays);
+#endif
 
       // TODO: Check if can be moved upwards.
       bool WasSplit = false;
@@ -848,7 +850,10 @@ private:
     return true;
   }
 
-  /// Prints the values in the OffloadArray \p OAs using LLVM_DEBUG.
+  /// Prints the values in the OffloadArrays \p OAs using LLVM_DEBUG.
+  /// For now this is a way to test that the function getValuesInOffloadArrays
+  /// is working properly.
+  /// TODO: Move this to a unittest when unittests are available for OpenMPOpt.
   void debugValuesInOffloadArrays(ArrayRef<OffloadArrayPtr> OAs) {
     assert(OAs.size() == 3 && "There are three offload arrays to debug!");
 
