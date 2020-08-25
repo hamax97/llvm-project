@@ -471,6 +471,12 @@ struct OffloadArray {
     return OA;
   }
 
+  /// Position of the offload arrays arguments in the runtime call:
+  /// __tgt_target_data_begin_mapper.
+  static const unsigned BasePtrsArgNum = 2;
+  static const unsigned PtrsArgNum = 3;
+  static const unsigned SizesArgNum = 4;
+
 private:
   /// Traverses the BasicBlock where Array is, collecting the stores made to
   /// Array, leaving StoredValues with the values stored before the instruction
@@ -558,12 +564,6 @@ private:
 
     return true;
   }
-
-  /// Position of the offload arrays arguments in the runtime call:
-  /// __tgt_target_data_begin_mapper.
-  static const unsigned BasePtrsArgNum = 2;
-  static const unsigned PtrsArgNum = 3;
-  static const unsigned SizesArgNum = 4;
 };
 
 using OffloadArrayPtr = std::unique_ptr<OffloadArray>;
@@ -592,7 +592,7 @@ struct MemoryTransfer {
   static MemoryTransferPtr initialize(CallInst &RuntimeCall,
                                       ArrayRef<OffloadArrayPtr> OffloadArrays) {
 
-    assert(OffloadArrays.size() > 2 && OffloadArrays[0] && OffloadArrays[1] &&
+    assert(OffloadArrays.size() == 3 && OffloadArrays[0] && OffloadArrays[1] &&
            "No offload arrays to look at!");
 
     auto MT = std::make_unique<MemoryTransfer>(RuntimeCall, OffloadArrays);
@@ -655,11 +655,12 @@ private:
   /// Gets the setup instructions for the value operand of \p S.
   bool getValueSetupInstructions(StoreInst &S) {
     auto *V = S.getValueOperand();
-    // Auxiliary storage to later insert the found instructions in the order
-    // needed.
-    SmallVector<Instruction *, 8> TempStorage;
+
+    // Auxiliary storage for later popping out the found instructions in the
+    // needed order.
+    const unsigned MaxLookup = 6;
+    SmallVector<Instruction *, MaxLookup> TempStorage;
     bool Success = false;
-    unsigned MaxLookup = 6;
     for (unsigned I = 0; I < MaxLookup; ++I) {
       if (isa<AllocaInst>(V) || isa<Argument>(V) || isa<GlobalValue>(V) ||
           isa<Constant>(V)) {
