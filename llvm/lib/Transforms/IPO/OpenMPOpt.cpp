@@ -604,6 +604,9 @@ struct MemoryTransfer {
   MemoryTransfer(CallInst &RuntimeCall, ArrayRef<OffloadArrayPtr> OffloadArrays)
       : RuntimeCall(RuntimeCall), OffloadArrays(OffloadArrays) {}
 
+  MemoryTransfer(const MemoryTransfer &) = delete;
+  MemoryTransfer &operator=(const MemoryTransfer &) = delete;
+
 private:
   /// Groups into Issue the instructions that compose the argument setup for
   /// RuntimeCall.
@@ -938,6 +941,7 @@ private:
       if (!MT)
         return false;
 
+
       // TODO: Check if MT can be moved upwards.
       bool WasSplit = false;
       Instruction *WaitMovementPoint = canBeMovedDownwards(*RTCall);
@@ -1040,6 +1044,13 @@ private:
         Printer << Separator;
       }
       LLVM_DEBUG(dbgs() << "\t\toffload_sizes: " << Printer.str() << "\n");
+    }
+  }
+
+  void debugInstructionsInMemoryTransferIssue(MemoryTransfer &MT) {
+    LLVM_DEBUG(dbgs() << TAG << " Successfully got set up instructions:\n");
+    for (auto *I : MT.Issue) {
+      I->print(errs());
     }
   }
 
