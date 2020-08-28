@@ -488,6 +488,7 @@ private:
     if (BB != Before.getParent())
       return false;
 
+    const DataLayout &DL = Array.getModule()->getDataLayout();
     for (Instruction &I : *BB) {
       if (&I == &Before)
         break;
@@ -496,9 +497,13 @@ private:
         continue;
 
       auto *S = cast<StoreInst>(&I);
-      auto *Dst = getUnderlyingObject(S->getPointerOperand());
+//      auto *Dst = getUnderlyingObject(S->getPointerOperand());
+      int64_t Offset = -1;
+      auto *Dst = GetPointerBaseWithConstantOffset(S->getPointerOperand(),
+                                                   Offset, DL);
       if (Dst == &Array) {
-        int64_t Idx = getAccessedIdx(*S);
+        int64_t Idx = Offset / DL.getPointerSize();
+        //int64_t Idx = getAccessedIdx(Offset);
         // Unexpected StoreInst.
         if (Idx == -1)
           return false;
@@ -513,38 +518,22 @@ private:
 
   /// Returns the Array's index where the store is being made. Returns -1 if
   /// the index can't be deduced. Assumes \p S as a store to Array.
-  int64_t getAccessedIdx(StoreInst &S) {
-    auto *Dst = S.getOperand(1);
-    // Unrecognized store pattern.
-    if (!isa<Instruction>(Dst))
+  int64_t getAccessedIdx(int64_t Offset) {
+    errs() << "Accessed Idx of " << Offset << " ---- ";
+    Array.print(errs()); errs() << " ---- ";
+    auto *AllocatedType = Array.getAllocatedType()->getArrayElementType();
+    AllocatedType->print(errs()); errs() << " ---- ";
+    if (AllocatedType->isPointerTy())
+      AllocatedType = AllocatedType->getPointerElementType();
+
+    AllocatedType->print(errs()); errs() << " ---- ";
+    // Unknown allocated array type.
+    if (!AllocatedType->isIntegerTy())
       return -1;
 
-    auto *DstInst = cast<Instruction>(Dst);
-    Value *Access = DstInst;
-    if (DstInst->isCast()) {
-      Access = DstInst->getOperand(0);
 
-      // Direct cast from the AllocaInst, which means a store to the
-      // first position of the array.
-      if (Access == &Array)
-        return 0;
-    }
-
-    // Unrecognized store pattern.
-    if (!isa<GetElementPtrInst>(Access))
-      return -1;
-
-    auto *GEPInst = cast<GetElementPtrInst>(Access);
-    // Unrecognized store pattern.
-    if (!GEPInst->hasIndices())
-      return -1;
-
-    auto *ArrayIdx = GEPInst->idx_begin() + 1;
-    // Unrecognized store pattern.
-    if (ArrayIdx == GEPInst->idx_end())
-      return -1;
-
-    return cast<ConstantInt>(ArrayIdx->get())->getZExtValue();
+    errs() << AllocatedType->getScalarSizeInBits() << " ---- " << Offset / AllocatedType->getScalarSizeInBits() << "\n";
+    return Offset / AllocatedType->getScalarSizeInBits();
   }
 
   /// Returns true if all values in StoredValues and
